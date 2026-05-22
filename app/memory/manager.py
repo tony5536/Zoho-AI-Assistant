@@ -1,5 +1,6 @@
 import json
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import aiosqlite
@@ -15,8 +16,14 @@ _PROJECT_ACCESS_LIMIT = 20
 class MemoryManager:
     """SQLite-backed session and per-user long-term memory."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        can_access_project: Callable[[str, str], bool] | None = None,
+    ) -> None:
         self._db_path = db_path
+        self._can_access_project = can_access_project
 
     async def initialize(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,19 +400,26 @@ class MemoryManager:
         return await self.apply_user_memory_to_session(user_id, session_id)
 
     async def save_default_project(self, user_id: str, context: ProjectContext) -> None:
+        validated = self._validate_project_context(user_id, context)
+        if validated is None:
+            return
         await self.set_user_preference(
             user_id,
             "default_project",
-            {"project_id": context.project_id, "project_name": context.project_name},
+            {
+                "project_id": validated.project_id,
+                "project_name": validated.project_name,
+            },
         )
-        await self._save_last_active_project(user_id, context)
-        await self._record_project_access(user_id, context)
+        await self._save_last_active_project(user_id, validated)
+        await self._record_project_access(user_id, validated)
 
     async def load_user_memory(self, user_id: str) -> UserMemorySnapshot:
         """Load persisted long-term memory for a user."""
         row = await self._fetch_user_memory_row(user_id)
         if row is None:
             legacy = await self._legacy_default_project(user_id)
+            legacy = self._validate_project_context(user_id, legacy)
             return UserMemorySnapshot(
                 user_id=user_id,
                 last_active_project=legacy,
@@ -418,8 +432,11 @@ class MemoryManager:
             last_active = await self._legacy_default_project(user_id)
 
         access = self._parse_project_access(row["project_access_json"])
+        last_active, access = self._sanitize_user_projects(user_id, last_active, access)
         frequent = self._top_frequent_project(access)
         recent_queries = self._recent_queries_from_messages(row["recent_messages_json"])
+
+        await self._repair_stored_projects(user_id, last_active, access)
 
         return UserMemorySnapshot(
             user_id=user_id,
@@ -467,9 +484,15 @@ class MemoryManager:
         messages = messages[-_RECENT_MESSAGES_LIMIT :]
 
         access = dict(current_access)
-        ctx = project_context or last_active_project
+        ctx = self._validate_project_context(
+            user_id, project_context or last_active_project
+        )
+        last = ctx or (self._validate_project_context(user_id, last) if last else None)
         if ctx:
+            access = self._filter_project_access(user_id, access)
             access = self._bump_access(access, ctx)
+        else:
+            access = self._filter_project_access(user_id, access)
 
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
@@ -540,12 +563,6 @@ class MemoryManager:
                 session_id,
                 snapshot.last_active_project.project_id,
                 snapshot.last_active_project.project_name,
-            )
-
-        legacy = await self._legacy_default_project(user_id)
-        if legacy:
-            return await self.set_project_context(
-                session_id, legacy.project_id, legacy.project_name
             )
         return None
 
@@ -665,11 +682,120 @@ class MemoryManager:
     async def _legacy_default_project(self, user_id: str) -> ProjectContext | None:
         default = await self.get_user_preference(user_id, "default_project")
         if isinstance(default, dict) and default.get("project_id"):
-            return ProjectContext(
-                project_id=default["project_id"],
-                project_name=default.get("project_name", default["project_id"]),
+            return self._validate_project_context(
+                user_id,
+                ProjectContext(
+                    project_id=default["project_id"],
+                    project_name=default.get("project_name", default["project_id"]),
+                ),
             )
         return None
+
+    def _validate_project_context(
+        self, user_id: str, context: ProjectContext | None
+    ) -> ProjectContext | None:
+        if context is None:
+            return None
+        if self._can_access_project is None:
+            return context
+        if self._can_access_project(user_id, context.project_id):
+            return context
+        return None
+
+    def _filter_project_access(
+        self, user_id: str, access: dict[str, dict]
+    ) -> dict[str, dict]:
+        if self._can_access_project is None:
+            return access
+        return {
+            pid: entry
+            for pid, entry in access.items()
+            if self._can_access_project(user_id, pid)
+        }
+
+    def _sanitize_user_projects(
+        self,
+        user_id: str,
+        last_active: ProjectContext | None,
+        access: dict[str, dict],
+    ) -> tuple[ProjectContext | None, dict[str, dict]]:
+        access = self._filter_project_access(user_id, access)
+        last_active = self._validate_project_context(user_id, last_active)
+        if last_active is None:
+            last_active = self._top_frequent_project(access)
+        return last_active, access
+
+    async def _repair_stored_projects(
+        self,
+        user_id: str,
+        last_active: ProjectContext | None,
+        access: dict[str, dict],
+    ) -> None:
+        """Persist sanitized project memory and drop invalid legacy defaults."""
+        row = await self._fetch_user_memory_row(user_id)
+        if row is None:
+            return
+
+        raw_last = self._parse_project_json(row["last_active_project_json"])
+        raw_access = self._parse_project_access(row["project_access_json"])
+        legacy = await self.get_user_preference(user_id, "default_project")
+
+        needs_repair = raw_last != last_active or raw_access != access
+        if isinstance(legacy, dict) and legacy.get("project_id"):
+            legacy_ctx = ProjectContext(
+                project_id=legacy["project_id"],
+                project_name=legacy.get("project_name", legacy["project_id"]),
+            )
+            if self._validate_project_context(user_id, legacy_ctx) is None:
+                needs_repair = True
+
+        if not needs_repair:
+            return
+
+        await self._ensure_user_memory_row(user_id)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_memory
+                SET last_active_project_json = ?,
+                    project_access_json = ?,
+                    updated_at = datetime('now')
+                WHERE user_id = ?
+                """,
+                (
+                    json.dumps(last_active.model_dump()) if last_active else None,
+                    json.dumps(access),
+                    user_id,
+                ),
+            )
+            await db.commit()
+
+        if isinstance(legacy, dict) and legacy.get("project_id"):
+            if self._validate_project_context(
+                user_id,
+                ProjectContext(
+                    project_id=legacy["project_id"],
+                    project_name=legacy.get("project_name", legacy["project_id"]),
+                ),
+            ) is None:
+                async with aiosqlite.connect(self._db_path) as db:
+                    await db.execute(
+                        """
+                        DELETE FROM user_preferences
+                        WHERE user_id = ? AND pref_key = 'default_project'
+                        """,
+                        (user_id,),
+                    )
+                    await db.commit()
+            elif last_active:
+                await self.set_user_preference(
+                    user_id,
+                    "default_project",
+                    {
+                        "project_id": last_active.project_id,
+                        "project_name": last_active.project_name,
+                    },
+                )
 
     @staticmethod
     def _parse_project_json(raw: str | None) -> ProjectContext | None:

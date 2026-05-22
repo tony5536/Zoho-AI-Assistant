@@ -52,11 +52,18 @@ class QueryAgent(BaseAgent):
             )
 
         if intent.operation == "get_task_details":
-            project_id = await self._resolve_project_id(session_id, message, intent, context)
             task_id = intent.params.get("task_id")
-            if not project_id or not task_id:
+            if not task_id:
                 return self._error(
-                    "Tell me the project and task id, e.g. task details TSK-101 in PRJ-001."
+                    'Include a task id, e.g. "task details for TSK-101" or "open task TSK-101".'
+                )
+            project_id = await self._resolve_project_id(session_id, message, intent, context)
+            if not project_id:
+                task = self._tools.get_task(task_id)
+                project_id = task.project_id if task else None
+            if not project_id:
+                return self._error(
+                    "I couldn't find that task. Check the task id or set project context first."
                 )
             context = await self._sync_project_context(session_id, project_id)
             return await self._respond_tool(

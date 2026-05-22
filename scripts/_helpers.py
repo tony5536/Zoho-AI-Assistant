@@ -9,7 +9,11 @@ from app.utils.config import Settings, get_settings
 
 async def build_test_service(db_path) -> AssistantService:
     settings = get_settings().model_copy(update={"zoho_use_mock": True, "memory_db_path": db_path})
-    memory = MemoryManager(settings.memory_db_path)
+    store = MockDataStore()
+    memory = MemoryManager(
+        settings.memory_db_path,
+        can_access_project=store.user_can_access_project,
+    )
     await memory.initialize()
     token_store = TokenStore(settings)
     await token_store.initialize()
@@ -17,6 +21,6 @@ async def build_test_service(db_path) -> AssistantService:
         settings,
         token_store,
         ZohoAuthService(settings),
-        MockDataStore(),
+        store,
     )
     return AssistantService(memory=memory, tools=tools)

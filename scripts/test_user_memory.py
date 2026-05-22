@@ -7,13 +7,15 @@ from pathlib import Path
 from app.memory.manager import MemoryManager
 from app.models.tool_models import ProjectContext
 from app.services.assistant_service import AssistantService
+from app.tools.mock_data import MockDataStore
 from scripts._helpers import build_test_service
 
 
 async def test_memory_manager_helpers() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "mem.db"
-        memory = MemoryManager(db)
+        store = MockDataStore()
+        memory = MemoryManager(db, can_access_project=store.user_can_access_project)
         await memory.initialize()
 
         user_id = "mock-jamie"
@@ -58,19 +60,55 @@ async def test_memory_manager_helpers() -> None:
         print("MemoryManager user_memory helpers: OK")
 
 
+async def test_invalid_project_not_restored() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "mem_invalid.db"
+        store = MockDataStore()
+        memory = MemoryManager(db, can_access_project=store.user_can_access_project)
+        await memory.initialize()
+
+        user_id = "mock-jamie"
+        owned = ProjectContext(project_id="PRJ-001", project_name="Website Redesign")
+        foreign = ProjectContext(project_id="PRJ-002", project_name="Mobile App Launch")
+
+        await memory.save_user_memory(
+            user_id,
+            display_name="Jamie Lee",
+            last_active_project=foreign,
+        )
+        await memory._record_project_access(user_id, owned)
+        await memory._record_project_access(user_id, owned)
+
+        session_id = "sess-jamie"
+        restored = await memory.apply_user_memory_to_session(user_id, session_id)
+        assert restored is not None
+        assert restored.project_id == "PRJ-001", restored
+
+        snapshot = await memory.load_user_memory(user_id)
+        assert snapshot.last_active_project == owned
+        assert "Mobile App Launch" not in (snapshot.welcome_message or "")
+        assert snapshot.frequent_project == owned
+
+        row = await memory._fetch_user_memory_row(user_id)
+        parsed = memory._parse_project_json(row["last_active_project_json"])
+        assert parsed == owned
+
+        print("Invalid project restoration blocked: OK")
+
+
 async def test_chat_persists_memory() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "chat_mem.db"
         service = await build_test_service(db)
         memory = service._memory
-        user_id = "user-a"
+        user_id = "mock-alex"
         session_id = "sess-a"
 
         await memory.save_user_memory(
             user_id,
-            display_name="Alex",
+            display_name="Alex Morgan",
             last_active_project=ProjectContext(
-                project_id="PRJ-002", project_name="Mobile App"
+                project_id="PRJ-002", project_name="Mobile App Launch"
             ),
         )
 
@@ -92,6 +130,7 @@ async def test_chat_persists_memory() -> None:
 
 async def main() -> None:
     await test_memory_manager_helpers()
+    await test_invalid_project_not_restored()
     await test_chat_persists_memory()
     print("All user memory tests passed.")
 

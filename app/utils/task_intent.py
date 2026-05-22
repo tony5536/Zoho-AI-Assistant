@@ -1,6 +1,7 @@
 """Natural-language parsing helpers for task actions (rule-based, no LLM)."""
 
 import re
+from typing import Any
 
 _CREATE_TASK_RE = re.compile(r"\b(create|add|new)\s+(?:a\s+)?task\b", re.IGNORECASE)
 
@@ -108,3 +109,160 @@ def _clean_task_name(raw: str) -> str:
     name = _ASSIGNEE_CLAUSE_RE.sub("", name)
     name = re.split(r"[.!?]\s+", name, maxsplit=1)[0]
     return name.rstrip(".,!? ").strip()
+
+
+_UPDATE_TASK_RE = re.compile(
+    r"\b(update|change|modify)\s+(?:a\s+)?(?:the\s+)?task\b",
+    re.IGNORECASE,
+)
+
+_MARK_STATUS_RE = re.compile(
+    r"\bmark\s+(TSK-\d+)\s+as\s+(\w+(?:\s+\w+)?)",
+    re.IGNORECASE,
+)
+
+_ASSIGN_TO_RE = re.compile(
+    r"\bassign\s+(TSK-\d+)\s+to\s+(.+?)(?:\s*$|\.)",
+    re.IGNORECASE,
+)
+
+_PRIORITY_RE = re.compile(
+    r"\b(?:change|set|update)\s+priority\s+of\s+(TSK-\d+)\s+to\s+(\w+)",
+    re.IGNORECASE,
+)
+
+_DUE_DATE_RE = re.compile(
+    r"\b(?:change|set|update)\s+due\s+date\s+of\s+(TSK-\d+)\s+to\s+(\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
+
+_STATUS_ALIASES: dict[str, str] = {
+    "complete": "completed",
+    "completed": "completed",
+    "done": "completed",
+    "open": "open",
+    "in progress": "in_progress",
+    "in_progress": "in_progress",
+    "on hold": "on_hold",
+    "on_hold": "on_hold",
+}
+
+
+def is_update_task_message(message: str) -> bool:
+    """True when the message requests a task field change (not create/delete)."""
+    if not _TSK_PATTERN.search(message):
+        return False
+    lower = message.lower()
+    if _UPDATE_TASK_RE.search(message):
+        return True
+    if _MARK_STATUS_RE.search(message):
+        return True
+    if _ASSIGN_TO_RE.search(message):
+        return True
+    if _PRIORITY_RE.search(message):
+        return True
+    if _DUE_DATE_RE.search(message):
+        return True
+    if any(
+        phrase in lower
+        for phrase in (
+            "mark ",
+            "assign ",
+            "set due date",
+            "change due date",
+            "change priority",
+            "set priority",
+        )
+    ):
+        return True
+    return False
+
+
+def parse_update_task_params(message: str) -> dict[str, Any]:
+    """Extract task_id and fields to update from conversational phrasing."""
+    params: dict[str, Any] = {}
+    task_match = _TSK_PATTERN.search(message)
+    if task_match:
+        params["task_id"] = task_match.group(1).upper()
+
+    mark = _MARK_STATUS_RE.search(message)
+    if mark:
+        params["task_id"] = mark.group(1).upper()
+        raw_status = mark.group(2).strip().lower()
+        params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
+
+    assign = _ASSIGN_TO_RE.search(message)
+    if assign:
+        params["task_id"] = assign.group(1).upper()
+        params["assignee"] = assign.group(2).strip().rstrip(".,!? ")
+
+    priority = _PRIORITY_RE.search(message)
+    if priority:
+        params["task_id"] = priority.group(1).upper()
+        params["priority"] = priority.group(2).strip().lower()
+
+    due = _DUE_DATE_RE.search(message)
+    if due:
+        params["task_id"] = due.group(1).upper()
+        params["due_date"] = due.group(2)
+
+    if _UPDATE_TASK_RE.search(message):
+        quoted = _extract_quoted(message)
+        if quoted:
+            params["name"] = quoted
+        lower = message.lower()
+        for status in ("open", "in_progress", "completed", "on_hold"):
+            if status.replace("_", " ") in lower or status in lower:
+                params["status"] = status
+                break
+        assignee_match = re.search(
+            r"assign(?:ee)?\s+to\s+([A-Za-z][A-Za-z\s]+)",
+            message,
+            re.IGNORECASE,
+        )
+        if assignee_match:
+            params["assignee"] = assignee_match.group(1).strip()
+
+    return params
+
+
+def is_get_task_details_message(message: str) -> bool:
+    """True when the user wants full details for a specific task."""
+    if not _TSK_PATTERN.search(message):
+        return False
+    lower = message.lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "task details",
+            "details for",
+            "show details",
+            "get details",
+            "show task",
+            "get task",
+            "open task",
+            "details for task",
+            "details of task",
+            "details on task",
+        )
+    )
+
+
+def is_list_project_members_message(message: str) -> bool:
+    """True when the user wants the member list for a project."""
+    lower = message.lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "list members",
+            "list project members",
+            "project members",
+            "team members",
+            "show members",
+            "who is on",
+            "who is in",
+            "who's in",
+            "members for",
+            "members of",
+        )
+    )

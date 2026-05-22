@@ -17,7 +17,11 @@ from app.utils.config import get_settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    memory = MemoryManager(settings.memory_db_path)
+    store = MockDataStore()
+    memory = MemoryManager(
+        settings.memory_db_path,
+        can_access_project=store.user_can_access_project,
+    )
     await memory.initialize()
 
     token_store = TokenStore(settings)
@@ -27,7 +31,6 @@ async def lifespan(app: FastAPI):
     await mock_user_store.initialize()
 
     zoho_auth = ZohoAuthService(settings)
-    store = MockDataStore()
     tools = create_zoho_tools(settings, token_store, zoho_auth, store)
 
     app.state.settings = settings

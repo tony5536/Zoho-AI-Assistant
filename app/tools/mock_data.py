@@ -169,6 +169,21 @@ class MockDataStore:
             if p.get("owner_user_id") == user_id
         }
 
+    def user_can_access_project(self, user_id: str | None, project_id: str) -> bool:
+        """True when the project belongs to the user in mock data (or is unknown to mock)."""
+        if not user_id:
+            return False
+        owner: str | None = None
+        found = False
+        for project in self._projects:
+            if project["project_id"] == project_id:
+                found = True
+                owner = project.get("owner_user_id")
+                break
+        if not found:
+            return True
+        return owner == user_id
+
     def _task_visible(self, task: dict, user_id: str | None) -> bool:
         if not user_id:
             return False
@@ -285,6 +300,8 @@ class MockDataStore:
         status: str | None = None,
         assignee: str | None = None,
         hours_estimated: float | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
     ) -> TaskSummary | None:
         if not self.get_task(task_id, user_id=user_id):
             return None
@@ -299,7 +316,11 @@ class MockDataStore:
                 task["assignee"] = assignee
             if hours_estimated is not None:
                 task["hours_estimated"] = hours_estimated
-            return TaskSummary(**task)
+            if due_date is not None:
+                task["due_date"] = due_date
+            if priority is not None:
+                task["priority"] = priority
+            return TaskSummary(**{k: v for k, v in task.items() if k in TaskSummary.model_fields})
         return None
 
     def delete_task(self, task_id: str, user_id: str | None = None) -> bool:
@@ -321,14 +342,40 @@ class MockDataStore:
             if task["project_id"] in allowed
         ]
 
+    def get_project_org(self, project_id: str) -> ProjectSummary | None:
+        """Resolve any organisation project (utilisation / reporting only)."""
+        for project in self._projects:
+            if project["project_id"] == project_id:
+                return ProjectSummary(
+                    **{k: v for k, v in project.items() if k in ProjectSummary.model_fields}
+                )
+        return None
+
+    def get_task_org(self, task_id: str) -> TaskSummary | None:
+        """Resolve any organisation task (utilisation / reporting only)."""
+        for task in self._tasks:
+            if task["task_id"] == task_id:
+                return TaskSummary(**task)
+        return None
+
+    def list_all_tasks_org(self, project_id: str | None = None) -> list[TaskSummary]:
+        """All tasks across the mock organisation (not scoped to one user)."""
+        if project_id:
+            return [
+                TaskSummary(**task)
+                for task in self._tasks
+                if task["project_id"] == project_id
+            ]
+        return [TaskSummary(**task) for task in self._tasks]
+
     def build_utilisation_summary(
         self,
         *,
-        user_id: str | None = None,
         view: str = "summary",
         project_id: str | None = None,
     ) -> UtilisationSummary:
-        if project_id and project_id not in self._project_ids_for_user(user_id):
+        """Organisation-wide utilisation analytics across all mock users/projects."""
+        if project_id and not self.get_project_org(project_id):
             return UtilisationSummary(
                 view=view,
                 scope="project",
@@ -343,10 +390,10 @@ class MockDataStore:
                 tasks=[],
             )
 
-        tasks = self.list_all_tasks(project_id, user_id=user_id)
+        tasks = self.list_all_tasks_org(project_id)
         project_name = None
         if project_id:
-            project = self.get_project(project_id, user_id=user_id)
+            project = self.get_project_org(project_id)
             project_name = project.name if project else None
 
         rows: list[TaskUtilisationRow] = []

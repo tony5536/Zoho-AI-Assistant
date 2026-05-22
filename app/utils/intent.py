@@ -8,6 +8,10 @@ from app.utils.task_intent import (
     is_confirmation_message,
     is_create_task_message,
     is_delete_task_message,
+    is_get_task_details_message,
+    is_list_project_members_message,
+    is_update_task_message,
+    parse_update_task_params,
 )
 from app.utils.utilisation_intent import detect_utilisation_view, is_utilisation_query
 
@@ -68,7 +72,7 @@ def parse_intent(message: str) -> ParsedIntent:
             },
         )
 
-    if _matches(lower, ("task details", "show task", "get task", "details for task")):
+    if is_get_task_details_message(text):
         return ParsedIntent(
             operation="get_task_details",
             params={
@@ -77,7 +81,7 @@ def parse_intent(message: str) -> ParsedIntent:
             },
         )
 
-    if _matches(lower, ("list members", "project members", "team members", "who is on")):
+    if is_list_project_members_message(text):
         project_id = _extract_id(text, r"\b(PRJ-\d+)\b")
         return ParsedIntent(
             operation="list_project_members",
@@ -111,13 +115,29 @@ def parse_intent(message: str) -> ParsedIntent:
             },
         )
 
-    if _matches(lower, ("update task", "change task", "modify task")):
+    if is_update_task_message(text):
+        params = parse_update_task_params(text)
+        if not params.get("status"):
+            status = _extract_status(lower)
+            if status:
+                params["status"] = status
+        if not params.get("priority"):
+            priority = _extract_priority(lower)
+            if priority:
+                params["priority"] = priority
+        if not params.get("due_date"):
+            due_date = _extract_update_due_date(text)
+            if due_date:
+                params["due_date"] = due_date
+        if not params.get("name"):
+            quoted = _extract_quoted(text)
+            if quoted:
+                params["name"] = quoted
         return ParsedIntent(
             operation="update_task",
             params={
-                "task_id": _extract_id(text, r"\b(TSK-\d+)\b"),
-                "name": _extract_quoted(text),
-                "status": _extract_status(lower),
+                **_project_params(text, _extract_id(text, r"\b(PRJ-\d+)\b")),
+                **params,
             },
         )
 
@@ -181,4 +201,20 @@ def _extract_due_date(lower: str) -> str | None:
         if token in lower:
             return token
     match = re.search(r"\bdue\s+(\d{4}-\d{2}-\d{2})\b", lower)
+    return match.group(1) if match else None
+
+
+def _extract_priority(lower: str) -> str | None:
+    for priority in ("high", "medium", "low"):
+        if re.search(rf"\b{priority}\b", lower):
+            return priority
+    return None
+
+
+def _extract_update_due_date(text: str) -> str | None:
+    match = re.search(
+        r"\b(?:due\s+date|due)\s+(?:of\s+TSK-\d+\s+)?to\s+(\d{4}-\d{2}-\d{2})\b",
+        text,
+        re.IGNORECASE,
+    )
     return match.group(1) if match else None

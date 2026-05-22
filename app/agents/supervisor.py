@@ -1,3 +1,4 @@
+import re
 from typing import Any, Literal
 
 from app.agents.base import BaseAgent
@@ -37,15 +38,23 @@ class SupervisorAgent(BaseAgent):
         if is_utilisation_query(message):
             return "query"
 
-        action_keywords = (
-            "create",
-            "add",
-            "update",
-            "delete",
-            "remove",
-            "modify",
-            "change",
-        )
-        if any(word in message for word in action_keywords):
+        if self._is_action_message(message):
             return "action"
         return "query"
+
+    def _is_action_message(self, message: str) -> bool:
+        """Word-boundary action cues so reads like 'assigned' stay on the query path."""
+        patterns = (
+            r"\bcreate\b",
+            r"\badd\b",
+            r"\bupdate\b",
+            r"\bdelete\b",
+            r"\bremove\b",
+            r"\bmodify\b",
+            r"\bchange\b",
+            r"\bmark\b",
+            r"\bassign\b",
+            r"\bset\s+due\b",
+            r"\bdue\s+date\b",
+        )
+        return any(re.search(pattern, message) for pattern in patterns)

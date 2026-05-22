@@ -209,7 +209,11 @@ class ActionAgent(BaseAgent):
                 k: v for k, v in params.items() if k not in skip and v is not None
             }
             if not updates:
-                return {}, "", "Tell me what to change (name, status, or assignee)."
+                return (
+                    {},
+                    "",
+                    "Tell me what to change (name, status, assignee, priority, or due date).",
+                )
             project_id = (
                 resolved_project_id
                 or params.get("project_id")
@@ -219,7 +223,7 @@ class ActionAgent(BaseAgent):
                 task = self._tools.get_task(task_id)
                 project_id = task.project_id if task else None
             payload = {"task_id": task_id, "project_id": project_id, **updates}
-            summary = f"Update {task_id}"
+            summary = self._update_summary(task_id, updates)
             return payload, summary, None
 
         if tool == "delete_task":
@@ -249,6 +253,27 @@ class ActionAgent(BaseAgent):
             return payload, summary, None
 
         return {}, "", f"Unsupported action: {tool}"
+
+    def _update_summary(self, task_id: str, updates: dict) -> str:
+        task = self._tools.get_task(task_id)
+        label = f'"{task.name}"' if task else task_id
+        parts: list[str] = []
+        if "status" in updates:
+            status = str(updates["status"]).replace("_", " ")
+            parts.append(f"status to {status}")
+        if "assignee" in updates:
+            parts.append(f"assignee to {updates['assignee']}")
+        if "priority" in updates:
+            parts.append(f"priority to {updates['priority']}")
+        if "due_date" in updates:
+            parts.append(f"due date to {updates['due_date']}")
+        if "name" in updates:
+            parts.append(f'name to "{updates["name"]}"')
+        if "hours_estimated" in updates:
+            parts.append(f"estimate to {updates['hours_estimated']}h")
+        if parts:
+            return f"Update {label} ({task_id}): " + ", ".join(parts)
+        return f"Update {label} ({task_id})"
 
     def _delete_summary(self, task_id: str) -> str:
         task = self._tools.get_task(task_id)
@@ -281,6 +306,14 @@ class ActionAgent(BaseAgent):
                 f"Confirm to create it, or cancel to leave things as they are."
             )
         if tool == "update_task":
+            task_id = pending.payload.get("task_id", "")
+            task = self._tools.get_task(task_id) if task_id else None
+            if task:
+                return (
+                    f'You are about to update "{task.name}" ({task_id}).\n'
+                    f"{pending.summary}.\n\n"
+                    f"Confirm to apply this change, or cancel to keep the task as-is."
+                )
             return (
                 f"{pending.summary}.\n\n"
                 f"Confirm to apply this change, or cancel to keep the task as-is."

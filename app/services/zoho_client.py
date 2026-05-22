@@ -183,6 +183,8 @@ class ZohoClient:
         status: str | None = None,
         assignee: str | None = None,
         hours_estimated: float | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
     ) -> TaskSummary:
         data: dict[str, str] = {}
         if name:
@@ -193,6 +195,10 @@ class ZohoClient:
             data["person_responsible"] = assignee
         if hours_estimated is not None:
             data["work"] = str(hours_estimated)
+        if due_date:
+            data["end_date"] = due_date
+        if priority:
+            data["priority"] = priority
         payload = await self._request(
             "POST",
             f"/projects/{project_id}/tasks/{task_id}/",

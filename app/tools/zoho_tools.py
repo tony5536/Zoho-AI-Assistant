@@ -185,6 +185,8 @@ class ZohoTools:
         status: str | None = None,
         assignee: str | None = None,
         hours_estimated: float | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
         project_id: str | None = None,
     ) -> ToolResponse:
         project_id = project_id or self._resolve_project_for_task(task_id)
@@ -199,6 +201,8 @@ class ZohoTools:
             status=status,
             assignee=assignee,
             hours_estimated=hours_estimated,
+            due_date=due_date,
+            priority=priority,
         )
         if live is not None:
             return ToolResponse(
@@ -214,6 +218,8 @@ class ZohoTools:
             status=status,
             assignee=assignee,
             hours_estimated=hours_estimated,
+            due_date=due_date,
+            priority=priority,
         )
         if task is None:
             return self._error("update_task", "TASK_NOT_FOUND", f"Task {task_id} not found.")
@@ -271,9 +277,8 @@ class ZohoTools:
         project_id: str | None = None,
         view: str = "summary",
     ) -> ToolResponse:
-        uid = self._mock_user()
         if task_id:
-            task = self._mock.get_task(task_id, user_id=uid)
+            task = self._mock.get_task_org(task_id)
             if task is None and await self._has_live():
                 project_id = project_id or self._resolve_project_for_task(task_id)
                 if project_id:
@@ -323,7 +328,7 @@ class ZohoTools:
                 ),
             )
 
-        if project_id and not self._mock.get_project(project_id, user_id=uid) and not await self._has_live():
+        if project_id and not self._mock.get_project_org(project_id) and not await self._has_live():
             return self._error(
                 "get_task_utilisation",
                 "PROJECT_NOT_FOUND",
@@ -331,7 +336,6 @@ class ZohoTools:
             )
 
         summary = self._mock.build_utilisation_summary(
-            user_id=uid,
             view=view,
             project_id=project_id,
         )
