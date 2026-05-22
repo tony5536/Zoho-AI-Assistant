@@ -272,6 +272,14 @@ Covers: list projects, project context, list tasks, create task with HITL confir
 
 ---
 
+## Demo Prompts
+
+- What projects do I have?
+- Show tasks for the first one
+- Create a task called API Integration
+- Delete task #3
+- Who has the most tasks this month?
+
 ## Project layout
 
 ```
