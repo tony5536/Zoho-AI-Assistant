@@ -14,7 +14,7 @@ A multi-agent assistant for **Zoho Projects** with OAuth sign-in, eight API tool
 | **Agents** | Supervisor routes to read-only **QueryAgent** or write **ActionAgent** |
 | **Tools (8)** | List/browse projects, tasks, members, utilisation; create/update/delete tasks (writes need approval) |
 | **HITL** | Create/update/delete tasks return `confirmation_required`; UI shows Confirm / Cancel |
-| **Memory** | Short-term: session chat, active project, pending actions. Long-term: default project, query history |
+| **Memory** | Short-term: session chat, active project, pending actions. Long-term (`user_memory`): last active project, recent messages, frequent project — restored on login and chat |
 | **Modes** | Live Zoho API or `ZOHO_USE_MOCK=true` for offline demos |
 
 ---

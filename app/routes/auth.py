@@ -2,7 +2,9 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.models.tool_models import ProjectContext
 
 router = APIRouter()
 
@@ -30,6 +32,10 @@ class MockLoginResponse(BaseModel):
     user_id: str
     username: str
     display_name: str
+    welcome_message: str | None = None
+    last_active_project: ProjectContext | None = None
+    frequent_project: ProjectContext | None = None
+    recent_queries: list[str] = Field(default_factory=list)
 
 
 @router.post("/mock-login", response_model=MockLoginResponse)
@@ -50,7 +56,19 @@ async def mock_login(request: Request, body: MockLoginRequest) -> MockLoginRespo
         refresh_token="mock-demo-refresh",
         expires_in=86400,
     )
-    return MockLoginResponse(**user)
+
+    memory = request.app.state.memory
+    snapshot = await memory.restore_user_memory_on_login(
+        user["user_id"],
+        display_name=user["display_name"],
+    )
+    return MockLoginResponse(
+        **user,
+        welcome_message=snapshot.welcome_message,
+        last_active_project=snapshot.last_active_project,
+        frequent_project=snapshot.frequent_project,
+        recent_queries=snapshot.recent_queries,
+    )
 
 
 @router.get("/login", response_model=AuthUrlResponse)
@@ -93,6 +111,8 @@ async def _redirect_to_zoho_auth(request: Request, user_id: str) -> RedirectResp
             refresh_token="mock-refresh",
             expires_in=86400,
         )
+        memory = request.app.state.memory
+        await memory.restore_user_memory_on_login(user_id)
         params = urlencode({"user_id": user_id, "auth": "success"})
         return RedirectResponse(url=f"{settings.frontend_url}?{params}")
 
@@ -144,6 +164,9 @@ async def callback(
         api_domain=tokens.get("api_domain"),
         accounts_url=accounts_url,
     )
+
+    memory = request.app.state.memory
+    await memory.restore_user_memory_on_login(state)
 
     params = urlencode({"user_id": state, "auth": "success"})
     return RedirectResponse(url=f"{settings.frontend_url}?{params}")

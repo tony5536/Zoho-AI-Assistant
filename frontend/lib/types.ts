@@ -21,6 +21,15 @@ export interface ChatRequest {
   action_id?: string | null;
 }
 
+export interface MemoryContextResponse {
+  user_id: string;
+  welcome_message?: string | null;
+  project_context?: ProjectContext | null;
+  last_active_project?: ProjectContext | null;
+  frequent_project?: ProjectContext | null;
+  recent_queries?: string[];
+}
+
 export interface ChatResponse {
   session_id: string;
   reply: string;

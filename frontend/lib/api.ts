@@ -1,4 +1,4 @@
-import type { ChatRequest, ChatResponse } from "./types";
+import type { ChatRequest, ChatResponse, MemoryContextResponse } from "./types";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8000";
@@ -27,6 +27,10 @@ export type MockLoginResponse = {
   user_id: string;
   username: string;
   display_name: string;
+  welcome_message?: string | null;
+  last_active_project?: { project_id: string; project_name: string } | null;
+  frequent_project?: { project_id: string; project_name: string } | null;
+  recent_queries?: string[];
 };
 
 export async function mockLogin(
@@ -58,6 +62,22 @@ export async function startZohoLogin(userId: string): Promise<void> {
   }
   const data = (await res.json()) as { authorization_url: string };
   window.location.href = data.authorization_url;
+}
+
+export async function fetchMemoryContext(
+  userId: string,
+  sessionId: string
+): Promise<MemoryContextResponse> {
+  const params = new URLSearchParams({
+    user_id: userId,
+    session_id: sessionId,
+  });
+  const res = await fetch(`${API_BASE}/memory/context?${params}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Could not load memory context");
+  }
+  return res.json() as Promise<MemoryContextResponse>;
 }
 
 export async function sendChatMessage(

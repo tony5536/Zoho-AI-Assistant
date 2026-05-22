@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "@/lib/auth-client";
-import { displayReply, sendChatMessage } from "@/lib/api";
+import { displayReply, fetchMemoryContext, sendChatMessage } from "@/lib/api";
 import { getSessionId, resetSessionId } from "@/lib/session";
 import { getUserId } from "@/lib/user";
 import type {
@@ -23,7 +23,7 @@ const ACTION_LABELS: Record<PendingAction["tool"], string> = {
   delete_task: "Delete task",
 };
 
-const WELCOME =
+const DEFAULT_WELCOME =
   "Hi — I can help with your Zoho projects: list projects and tasks, review team workload, and prepare create or delete actions for your approval.\n\nTry: \"What projects do I have?\" then \"Show tasks for the first one\".";
 
 export function Chat() {
@@ -44,9 +44,34 @@ export function Chat() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setSessionId(getSessionId());
-    setUserId(getUserId());
-    setMessages([{ id: uid(), role: "assistant", content: WELCOME }]);
+    const sid = getSessionId();
+    const uidVal = getUserId();
+    setSessionId(sid);
+    setUserId(uidVal);
+
+    let cancelled = false;
+    (async () => {
+      let welcome = DEFAULT_WELCOME;
+      try {
+        const ctx = await fetchMemoryContext(uidVal, sid);
+        if (cancelled) return;
+        if (ctx.welcome_message) {
+          welcome = `${ctx.welcome_message}\n\n${DEFAULT_WELCOME}`;
+        }
+        if (ctx.project_context) {
+          setProjectContext(ctx.project_context);
+        }
+      } catch {
+        /* use default welcome when memory API is unavailable */
+      }
+      if (!cancelled) {
+        setMessages([{ id: uid(), role: "assistant", content: welcome }]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

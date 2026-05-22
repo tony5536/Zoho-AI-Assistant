@@ -5,10 +5,15 @@ from pathlib import Path
 import aiosqlite
 
 from app.models.tool_models import PendingAction, ProjectContext, RecentProject
+from app.models.user_memory import StoredMessage, UserMemorySnapshot
+
+_RECENT_QUERIES_LIMIT = 10
+_RECENT_MESSAGES_LIMIT = 10
+_PROJECT_ACCESS_LIMIT = 20
 
 
 class MemoryManager:
-    """SQLite-backed session memory: chat history, project context, pending actions."""
+    """SQLite-backed session and per-user long-term memory."""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
@@ -97,6 +102,18 @@ class MemoryManager:
                 """
                 CREATE INDEX IF NOT EXISTS idx_query_history_user
                 ON user_query_history (user_id, created_at DESC)
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memory (
+                    user_id TEXT PRIMARY KEY,
+                    display_name TEXT,
+                    last_active_project_json TEXT,
+                    recent_messages_json TEXT NOT NULL DEFAULT '[]',
+                    project_access_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
                 """
             )
             await db.commit()
@@ -372,18 +389,8 @@ class MemoryManager:
             return [row["query_text"] for row in rows]
 
     async def apply_long_term_context(self, user_id: str, session_id: str) -> ProjectContext | None:
-        """Restore default project from long-term memory when session has no context."""
-        existing = await self.get_project_context(session_id)
-        if existing:
-            return existing
-        default = await self.get_user_preference(user_id, "default_project")
-        if isinstance(default, dict) and default.get("project_id"):
-            return await self.set_project_context(
-                session_id,
-                default["project_id"],
-                default.get("project_name", default["project_id"]),
-            )
-        return None
+        """Restore active project from per-user memory when session has no context."""
+        return await self.apply_user_memory_to_session(user_id, session_id)
 
     async def save_default_project(self, user_id: str, context: ProjectContext) -> None:
         await self.set_user_preference(
@@ -391,6 +398,351 @@ class MemoryManager:
             "default_project",
             {"project_id": context.project_id, "project_name": context.project_name},
         )
+        await self._save_last_active_project(user_id, context)
+        await self._record_project_access(user_id, context)
+
+    async def load_user_memory(self, user_id: str) -> UserMemorySnapshot:
+        """Load persisted long-term memory for a user."""
+        row = await self._fetch_user_memory_row(user_id)
+        if row is None:
+            legacy = await self._legacy_default_project(user_id)
+            return UserMemorySnapshot(
+                user_id=user_id,
+                last_active_project=legacy,
+                frequent_project=None,
+                recent_queries=await self.get_recent_user_queries(user_id),
+            )
+
+        last_active = self._parse_project_json(row["last_active_project_json"])
+        if last_active is None:
+            last_active = await self._legacy_default_project(user_id)
+
+        access = self._parse_project_access(row["project_access_json"])
+        frequent = self._top_frequent_project(access)
+        recent_queries = self._recent_queries_from_messages(row["recent_messages_json"])
+
+        return UserMemorySnapshot(
+            user_id=user_id,
+            display_name=row["display_name"],
+            last_active_project=last_active,
+            frequent_project=frequent,
+            recent_queries=recent_queries,
+            welcome_message=self.build_welcome_message(
+                display_name=row["display_name"],
+                last_active_project=last_active,
+                frequent_project=frequent,
+            ),
+        )
+
+    async def save_user_memory(
+        self,
+        user_id: str,
+        *,
+        display_name: str | None = None,
+        last_active_project: ProjectContext | None = None,
+        user_message: str | None = None,
+        assistant_reply: str | None = None,
+        project_context: ProjectContext | None = None,
+    ) -> None:
+        """Persist long-term memory fields for a user."""
+        row = await self._fetch_user_memory_row(user_id)
+        current_name = row["display_name"] if row else None
+        current_last = (
+            self._parse_project_json(row["last_active_project_json"]) if row else None
+        )
+        current_messages = (
+            self._parse_messages_json(row["recent_messages_json"]) if row else []
+        )
+        current_access = (
+            self._parse_project_access(row["project_access_json"]) if row else {}
+        )
+
+        name = display_name or current_name
+        last = last_active_project or project_context or current_last
+        messages = list(current_messages)
+        if user_message:
+            messages.append(StoredMessage(role="user", content=user_message))
+        if assistant_reply:
+            messages.append(StoredMessage(role="assistant", content=assistant_reply))
+        messages = messages[-_RECENT_MESSAGES_LIMIT :]
+
+        access = dict(current_access)
+        ctx = project_context or last_active_project
+        if ctx:
+            access = self._bump_access(access, ctx)
+
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO user_memory (
+                    user_id,
+                    display_name,
+                    last_active_project_json,
+                    recent_messages_json,
+                    project_access_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    display_name = COALESCE(excluded.display_name, user_memory.display_name),
+                    last_active_project_json = COALESCE(
+                        excluded.last_active_project_json,
+                        user_memory.last_active_project_json
+                    ),
+                    recent_messages_json = excluded.recent_messages_json,
+                    project_access_json = excluded.project_access_json,
+                    updated_at = datetime('now')
+                """,
+                (
+                    user_id,
+                    name,
+                    json.dumps(last.model_dump()) if last else None,
+                    json.dumps([m.model_dump() for m in messages]),
+                    json.dumps(access),
+                ),
+            )
+            await db.commit()
+
+    async def restore_user_memory_on_login(
+        self,
+        user_id: str,
+        display_name: str | None = None,
+    ) -> UserMemorySnapshot:
+        """Load user memory on login and refresh display name when known."""
+        if display_name:
+            await self._ensure_user_memory_row(user_id, display_name)
+        snapshot = await self.load_user_memory(user_id)
+        if display_name and not snapshot.display_name:
+            snapshot = snapshot.model_copy(update={"display_name": display_name})
+        snapshot = snapshot.model_copy(
+            update={
+                "welcome_message": self.build_welcome_message(
+                    display_name=snapshot.display_name,
+                    last_active_project=snapshot.last_active_project,
+                    frequent_project=snapshot.frequent_project,
+                )
+            }
+        )
+        return snapshot
+
+    async def apply_user_memory_to_session(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> ProjectContext | None:
+        """Preload last active project into session context when the session is new."""
+        existing = await self.get_project_context(session_id)
+        if existing:
+            return existing
+
+        snapshot = await self.load_user_memory(user_id)
+        if snapshot.last_active_project:
+            return await self.set_project_context(
+                session_id,
+                snapshot.last_active_project.project_id,
+                snapshot.last_active_project.project_name,
+            )
+
+        legacy = await self._legacy_default_project(user_id)
+        if legacy:
+            return await self.set_project_context(
+                session_id, legacy.project_id, legacy.project_name
+            )
+        return None
+
+    async def sync_user_memory_on_chat(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        user_message: str | None = None,
+        assistant_reply: str | None = None,
+        project_context: ProjectContext | None = None,
+    ) -> None:
+        """Apply memory to the session before chat and persist updates after."""
+        await self.apply_user_memory_to_session(user_id, session_id)
+        if user_message or assistant_reply or project_context:
+            await self.save_user_memory(
+                user_id,
+                user_message=user_message,
+                assistant_reply=assistant_reply,
+                project_context=project_context,
+            )
+
+    @staticmethod
+    def build_welcome_message(
+        *,
+        display_name: str | None,
+        last_active_project: ProjectContext | None,
+        frequent_project: ProjectContext | None,
+    ) -> str | None:
+        parts: list[str] = []
+        if display_name:
+            parts.append(f"Welcome back {display_name}.")
+        if last_active_project:
+            parts.append(
+                f"Last time you worked on {last_active_project.project_name}."
+            )
+        if frequent_project and (
+            not last_active_project
+            or frequent_project.project_id != last_active_project.project_id
+        ):
+            parts.append(f"You frequently access {frequent_project.project_id}.")
+        if not parts:
+            return None
+        return " ".join(parts)
+
+    async def _fetch_user_memory_row(self, user_id: str) -> aiosqlite.Row | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT display_name, last_active_project_json,
+                       recent_messages_json, project_access_json
+                FROM user_memory
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            return await cursor.fetchone()
+
+    async def _ensure_user_memory_row(
+        self, user_id: str, display_name: str | None = None
+    ) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            if display_name:
+                await db.execute(
+                    """
+                    INSERT INTO user_memory (user_id, display_name)
+                    VALUES (?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        updated_at = datetime('now')
+                    """,
+                    (user_id, display_name),
+                )
+            else:
+                await db.execute(
+                    "INSERT OR IGNORE INTO user_memory (user_id) VALUES (?)",
+                    (user_id,),
+                )
+            await db.commit()
+
+    async def _save_last_active_project(
+        self, user_id: str, context: ProjectContext
+    ) -> None:
+        await self._ensure_user_memory_row(user_id)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_memory
+                SET last_active_project_json = ?,
+                    updated_at = datetime('now')
+                WHERE user_id = ?
+                """,
+                (json.dumps(context.model_dump()), user_id),
+            )
+            await db.commit()
+
+    async def _record_project_access(
+        self, user_id: str, context: ProjectContext
+    ) -> None:
+        row = await self._fetch_user_memory_row(user_id)
+        access = self._parse_project_access(row["project_access_json"]) if row else {}
+        access = self._bump_access(access, context)
+        await self._ensure_user_memory_row(user_id)
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_memory
+                SET project_access_json = ?,
+                    updated_at = datetime('now')
+                WHERE user_id = ?
+                """,
+                (json.dumps(access), user_id),
+            )
+            await db.commit()
+
+    async def _legacy_default_project(self, user_id: str) -> ProjectContext | None:
+        default = await self.get_user_preference(user_id, "default_project")
+        if isinstance(default, dict) and default.get("project_id"):
+            return ProjectContext(
+                project_id=default["project_id"],
+                project_name=default.get("project_name", default["project_id"]),
+            )
+        return None
+
+    @staticmethod
+    def _parse_project_json(raw: str | None) -> ProjectContext | None:
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict) and data.get("project_id"):
+            return ProjectContext(
+                project_id=data["project_id"],
+                project_name=data.get("project_name", data["project_id"]),
+            )
+        return None
+
+    @staticmethod
+    def _parse_messages_json(raw: str | None) -> list[StoredMessage]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [StoredMessage(**item) for item in data if isinstance(item, dict)]
+
+    @staticmethod
+    def _parse_project_access(raw: str | None) -> dict[str, dict]:
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _bump_access(
+        access: dict[str, dict], context: ProjectContext
+    ) -> dict[str, dict]:
+        entry = access.get(context.project_id, {})
+        count = int(entry.get("count", 0)) + 1
+        access[context.project_id] = {
+            "project_id": context.project_id,
+            "project_name": context.project_name,
+            "count": count,
+        }
+        if len(access) > _PROJECT_ACCESS_LIMIT:
+            sorted_ids = sorted(
+                access,
+                key=lambda pid: int(access[pid].get("count", 0)),
+            )
+            for pid in sorted_ids[: len(access) - _PROJECT_ACCESS_LIMIT]:
+                del access[pid]
+        return access
+
+    @staticmethod
+    def _top_frequent_project(access: dict[str, dict]) -> ProjectContext | None:
+        if not access:
+            return None
+        top_id = max(access, key=lambda pid: int(access[pid].get("count", 0)))
+        top = access[top_id]
+        return ProjectContext(
+            project_id=top.get("project_id", top_id),
+            project_name=top.get("project_name", top_id),
+        )
+
+    @staticmethod
+    def _recent_queries_from_messages(raw: str | None) -> list[str]:
+        messages = MemoryManager._parse_messages_json(raw)
+        return [m.content for m in messages if m.role == "user"][-_RECENT_QUERIES_LIMIT:]
 
     async def resolve_pending_action(self, action_id: str) -> None:
         async with aiosqlite.connect(self._db_path) as db:

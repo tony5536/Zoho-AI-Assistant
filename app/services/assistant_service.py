@@ -42,7 +42,10 @@ class AssistantService:
 
         if request.user_id:
             await self._memory.record_user_query(request.user_id, request.message)
-            await self._memory.apply_long_term_context(request.user_id, request.session_id)
+            await self._memory.sync_user_memory_on_chat(
+                request.user_id,
+                request.session_id,
+            )
 
         history = await self._memory.get_history(request.session_id)
         project_context = await self._memory.get_project_context(request.session_id)
@@ -74,8 +77,16 @@ class AssistantService:
         tool_result = result.get("tool_result")
         updated_context = result.get("project_context") or project_context
 
-        if request.user_id and updated_context:
-            await self._memory.save_default_project(request.user_id, updated_context)
+        if request.user_id:
+            if updated_context:
+                await self._memory.save_default_project(request.user_id, updated_context)
+            await self._memory.sync_user_memory_on_chat(
+                request.user_id,
+                request.session_id,
+                user_message=request.message,
+                assistant_reply=reply,
+                project_context=updated_context,
+            )
 
         await self._memory.append(
             session_id=request.session_id,
