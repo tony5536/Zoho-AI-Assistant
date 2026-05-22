@@ -1,0 +1,265 @@
+from typing import Any
+
+import httpx
+
+from app.models.tool_models import (
+    ListProjectsResult,
+    ListTasksResult,
+    ProjectMember,
+    ProjectSummary,
+    TaskDetails,
+    TaskSummary,
+)
+from app.utils.config import Settings
+
+
+class ZohoClient:
+    """Zoho Projects REST API client (OAuth bearer token)."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def _base_url(self, api_domain: str | None = None) -> str:
+        domain = (api_domain or self._settings.zoho_api_domain).rstrip("/")
+        portal = self._settings.zoho_portal_id
+        return f"{domain}/restapi/portal/{portal}"
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        access_token: str,
+        *,
+        api_domain: str | None = None,
+        params: dict | None = None,
+        data: dict | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self._base_url(api_domain)}{path}"
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                data=data,
+            )
+            response.raise_for_status()
+            if not response.content:
+                return {}
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(payload["error"].get("message", "Zoho API error"))
+            return payload
+
+    async def list_projects(self, access_token: str, api_domain: str | None = None) -> ListProjectsResult:
+        payload = await self._request("GET", "/projects/", access_token, api_domain=api_domain)
+        projects = [
+            ProjectSummary(
+                project_id=str(p.get("id_string") or p.get("id")),
+                name=p.get("name", ""),
+                status=self._map_project_status(p),
+                owner=self._owner_name(p),
+            )
+            for p in payload.get("projects", [])
+        ]
+        return ListProjectsResult(projects=projects, count=len(projects))
+
+    async def list_tasks(
+        self,
+        access_token: str,
+        project_id: str,
+        *,
+        api_domain: str | None = None,
+        status: str | None = None,
+        assignee: str | None = None,
+        due_date: str | None = None,
+    ) -> ListTasksResult:
+        params: dict[str, str] = {"owner": "all"}
+        if status:
+            zoho_status = "completed" if status.lower() in ("completed", "done", "closed") else "notcompleted"
+            if status.lower() in ("all", "open", "in_progress", "on_hold"):
+                params["status"] = "all" if status.lower() == "all" else "notcompleted"
+            else:
+                params["status"] = zoho_status
+        if assignee and assignee.lower() != "all":
+            params["owner"] = assignee
+        if due_date:
+            due = due_date.lower()
+            if due in ("today", "tomorrow", "overdue"):
+                params["time"] = due
+
+        payload = await self._request(
+            "GET",
+            f"/projects/{project_id}/tasks/",
+            access_token,
+            api_domain=api_domain,
+            params=params,
+        )
+        tasks = [self._map_task(t, project_id) for t in payload.get("tasks", [])]
+        return ListTasksResult(project_id=project_id, tasks=tasks, count=len(tasks))
+
+    async def get_task_details(
+        self,
+        access_token: str,
+        project_id: str,
+        task_id: str,
+        *,
+        api_domain: str | None = None,
+    ) -> TaskDetails:
+        payload = await self._request(
+            "GET",
+            f"/projects/{project_id}/tasks/{task_id}/",
+            access_token,
+            api_domain=api_domain,
+        )
+        task = payload.get("tasks", [payload])[0] if payload.get("tasks") else payload
+        summary = self._map_task(task, project_id)
+        return TaskDetails(
+            **summary.model_dump(),
+            description=task.get("description") or "",
+            due_date=task.get("end_date"),
+            priority=task.get("priority") or task.get("priority_name"),
+            created_time=task.get("created_time"),
+        )
+
+    async def list_project_members(
+        self,
+        access_token: str,
+        project_id: str,
+        *,
+        api_domain: str | None = None,
+    ) -> list[ProjectMember]:
+        payload = await self._request(
+            "GET",
+            f"/projects/{project_id}/users/",
+            access_token,
+            api_domain=api_domain,
+        )
+        users = payload.get("users", payload.get("project_users", []))
+        members: list[ProjectMember] = []
+        for user in users:
+            members.append(
+                ProjectMember(
+                    user_id=str(user.get("id") or user.get("zpuid") or ""),
+                    name=user.get("name") or user.get("full_name", ""),
+                    email=user.get("email"),
+                    role=user.get("role") or user.get("profile_name"),
+                )
+            )
+        return members
+
+    async def create_task(
+        self,
+        access_token: str,
+        project_id: str,
+        name: str,
+        *,
+        api_domain: str | None = None,
+        assignee: str = "Unassigned",
+        hours_estimated: float = 8.0,
+    ) -> TaskSummary:
+        data: dict[str, str] = {"name": name}
+        if assignee and assignee != "Unassigned":
+            data["person_responsible"] = assignee
+        payload = await self._request(
+            "POST",
+            f"/projects/{project_id}/tasks/",
+            access_token,
+            api_domain=api_domain,
+            data=data,
+        )
+        task = payload.get("tasks", [payload])[0] if payload.get("tasks") else payload
+        return self._map_task(task, project_id)
+
+    async def update_task(
+        self,
+        access_token: str,
+        project_id: str,
+        task_id: str,
+        *,
+        api_domain: str | None = None,
+        name: str | None = None,
+        status: str | None = None,
+        assignee: str | None = None,
+        hours_estimated: float | None = None,
+    ) -> TaskSummary:
+        data: dict[str, str] = {}
+        if name:
+            data["name"] = name
+        if status:
+            data["custom_status"] = status
+        if assignee:
+            data["person_responsible"] = assignee
+        if hours_estimated is not None:
+            data["work"] = str(hours_estimated)
+        payload = await self._request(
+            "POST",
+            f"/projects/{project_id}/tasks/{task_id}/",
+            access_token,
+            api_domain=api_domain,
+            data=data,
+        )
+        task = payload.get("tasks", [payload])[0] if payload.get("tasks") else payload
+        return self._map_task(task, project_id)
+
+    async def delete_task(
+        self,
+        access_token: str,
+        project_id: str,
+        task_id: str,
+        *,
+        api_domain: str | None = None,
+    ) -> None:
+        await self._request(
+            "DELETE",
+            f"/projects/{project_id}/tasks/{task_id}/",
+            access_token,
+            api_domain=api_domain,
+        )
+
+    def _map_task(self, raw: dict, project_id: str) -> TaskSummary:
+        owners = raw.get("details", {}).get("owners", [])
+        assignee = owners[0]["name"] if owners else raw.get("person_responsible", "Unassigned")
+        logged = self._parse_hours(raw.get("work") or raw.get("log_hours") or "0")
+        estimated = self._parse_hours(raw.get("duration") or raw.get("work") or "8")
+        status = "completed" if raw.get("completed") else raw.get("status", "open")
+        return TaskSummary(
+            task_id=str(raw.get("id_string") or raw.get("id")),
+            project_id=str(raw.get("project_id") or project_id),
+            name=raw.get("name", ""),
+            status=str(status),
+            assignee=str(assignee),
+            hours_logged=logged,
+            hours_estimated=estimated,
+            due_date=raw.get("end_date") or raw.get("due_date"),
+            priority=raw.get("priority") or raw.get("priority_name"),
+        )
+
+    def _map_project_status(self, raw: dict) -> str:
+        if raw.get("project_status"):
+            return str(raw["project_status"])
+        if raw.get("status"):
+            return str(raw["status"])
+        return "active"
+
+    def _owner_name(self, raw: dict) -> str:
+        owner = raw.get("owner_name") or raw.get("owner")
+        if isinstance(owner, dict):
+            return owner.get("name", "")
+        return str(owner or "")
+
+    def _parse_hours(self, value: str | float | int) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if ":" in text:
+            parts = text.split(":")
+            try:
+                return float(parts[0]) + float(parts[1]) / 60.0
+            except ValueError:
+                return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0

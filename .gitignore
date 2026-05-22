@@ -1,0 +1,26 @@
+# Environment
+.env
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# SQLite / local databases
+*.sqlite
+*.db
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+
+# Local data
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
