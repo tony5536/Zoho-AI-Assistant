@@ -1,5 +1,5 @@
 import { fetchAuthStatus, logoutUser } from "@/lib/api";
-import { getUserId, hasAuthFlag, setAuthFlag } from "@/lib/user";
+import { clearAuthFlag, getUserId, hasAuthFlag, setAuthFlag } from "@/lib/user";
 
 export type AuthCheckStatus = "loading" | "authenticated" | "unauthenticated";
 

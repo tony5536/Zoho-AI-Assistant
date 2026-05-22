@@ -18,9 +18,14 @@ async def require_chat_user(request: Request, body: ChatRequest) -> str:
         )
 
     token_store = request.app.state.token_store
-    if not await token_store.has_valid_token(body.user_id):
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated with Zoho. Visit /auth/login to connect.",
-        )
+    auth_service = request.app.state.zoho_auth
+    try:
+        token = await token_store.ensure_valid_access_token(body.user_id, auth_service)
+        if not token:
+            raise HTTPException(
+                status_code=401,
+                detail="Not authenticated with Zoho. Visit /auth/login to connect.",
+            )
+    except RuntimeError:
+        raise
     return body.user_id

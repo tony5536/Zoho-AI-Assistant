@@ -359,7 +359,9 @@ class ZohoTools:
                 return await self._execute_live(operation, *args, **kwargs)
             except Exception:
                 return None
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, RuntimeError) and ("Zoho token refresh failed" in str(exc) or "Cannot refresh access token" in str(exc)):
+                raise
             return None
 
     async def _execute_live(self, operation: str, *args, **kwargs):

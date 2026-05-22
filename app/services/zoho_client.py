@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import httpx
@@ -12,17 +13,82 @@ from app.models.tool_models import (
 )
 from app.utils.config import Settings
 
+logger = logging.getLogger(__name__)
+
 
 class ZohoClient:
     """Zoho Projects REST API client (OAuth bearer token)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._resolved_portal_id: str | None = None
 
-    def _base_url(self, api_domain: str | None = None) -> str:
+    def _base_url(self, portal_id: str, api_domain: str | None = None) -> str:
         domain = (api_domain or self._settings.zoho_api_domain).rstrip("/")
-        portal = self._settings.zoho_portal_id
-        return f"{domain}/restapi/portal/{portal}"
+        return f"{domain}/restapi/portal/{portal_id}"
+
+    async def _get_portal_id(self, access_token: str, api_domain: str | None = None) -> str:
+        if self._resolved_portal_id:
+            return self._resolved_portal_id
+
+        configured = self._settings.zoho_portal_id
+        # If the portal ID is numeric, use it directly
+        if configured.isdigit():
+            logger.info("Configured ZOHO_PORTAL_ID '%s' is numeric; using it directly", configured)
+            self._resolved_portal_id = configured
+            return configured
+
+        # Otherwise, query /portals/ to resolve the name to the numeric ID
+        domain = (api_domain or self._settings.zoho_api_domain).rstrip("/")
+        url = f"{domain}/restapi/portals/"
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        logger.info(
+            "Resolving portal ID dynamically for name '%s' via URL: %s",
+            configured,
+            url,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+                portals = payload.get("portals", [])
+                
+                # Check for match
+                for p in portals:
+                    p_name = p.get("name", "")
+                    p_id = str(p.get("id") or p.get("id_string") or "")
+                    if p_name.lower() == configured.lower() or p_id == configured:
+                        logger.info(
+                            "Resolved portal name '%s' to numeric ID '%s'",
+                            configured,
+                            p_id,
+                        )
+                        self._resolved_portal_id = p_id
+                        return p_id
+
+                # Fallback: if list is not empty, use the first portal's ID
+                if portals:
+                    first_id = str(portals[0].get("id") or portals[0].get("id_string") or "")
+                    logger.warning(
+                        "No matching portal name found for '%s'. Falling back to the first portal ID in the list: '%s'",
+                        configured,
+                        first_id,
+                    )
+                    self._resolved_portal_id = first_id
+                    return first_id
+
+                logger.warning(
+                    "No portals returned by Zoho API. Falling back to configured string: '%s'",
+                    configured,
+                )
+                self._resolved_portal_id = configured
+                return configured
+        except Exception as exc:
+            logger.error("Error resolving portal ID dynamically: %s. Falling back to configured value.", exc)
+            # Do not cache error so we can retry on next request, but return configured as fallback
+            return configured
 
     async def _request(
         self,
@@ -34,8 +100,10 @@ class ZohoClient:
         params: dict | None = None,
         data: dict | None = None,
     ) -> dict[str, Any]:
-        url = f"{self._base_url(api_domain)}{path}"
+        portal_id = await self._get_portal_id(access_token, api_domain)
+        url = f"{self._base_url(portal_id, api_domain)}{path}"
         headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        logger.info("Making Zoho Projects API request: %s %s", method, url)
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(
                 method,
@@ -44,6 +112,9 @@ class ZohoClient:
                 params=params,
                 data=data,
             )
+            logger.info("Zoho Projects API responded with status: %s", response.status_code)
+            if response.status_code == 401:
+                logger.error("Zoho Projects API returned 401 Unauthorized. Access token may be expired or portal ID is invalid.")
             response.raise_for_status()
             if not response.content:
                 return {}
@@ -51,6 +122,7 @@ class ZohoClient:
             if isinstance(payload, dict) and payload.get("error"):
                 raise RuntimeError(payload["error"].get("message", "Zoho API error"))
             return payload
+
 
     async def list_projects(self, access_token: str, api_domain: str | None = None) -> ListProjectsResult:
         payload = await self._request("GET", "/projects/", access_token, api_domain=api_domain)

@@ -1,11 +1,9 @@
-from fastapi import APIRouter, Request
-
-from app.models.responses import HealthResponse
+from fastapi import APIRouter
 
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse)
-async def health(request: Request) -> HealthResponse:
-    settings = request.app.state.settings
-    return HealthResponse(status="ok", app_name=settings.app_name)
+@router.get("/health")
+async def health() -> dict[str, str]:
+    """Liveness probe for the Next.js frontend and local dev tooling."""
+    return {"status": "ok"}

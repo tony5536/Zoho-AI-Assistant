@@ -93,10 +93,12 @@ copy .env.example .env
 Edit **`.env`** (never commit real secrets to `.env.example`). Then start the API:
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-API base URL: http://localhost:8000
+API base URL: http://localhost:8000 — confirm with `curl http://localhost:8000/health` (`{"status":"ok",...}`).
+
+**Frontend cannot reach API?** Start the backend first, then `npm run dev` in `frontend/`. Ensure `frontend/.env.local` contains `NEXT_PUBLIC_API_URL=http://localhost:8000` (see `.env.local.example`). The UI retries `/health` before showing connection errors; check the browser console for `[api]` debug lines.
 
 ### 2. Frontend
 
@@ -270,6 +272,7 @@ Before presenting, verify:
 | `Zoho OAuth is not configured` | No `.env` or empty `ZOHO_CLIENT_ID` | Copy `.env.example` → `.env`, add credentials, restart backend |
 | `KeyError: 'access_token'` or 500 on `/auth/callback` | Wrong accounts region (e.g. India account, US URLs) | Set `ZOHO_ACCOUNTS_URL` / `ZOHO_API_DOMAIN` to `.in` (or your region); reconnect |
 | `uid is not a function` (frontend) | Fixed in `Chat.tsx` — pull latest | Refresh / restart `npm run dev` |
+| `Cannot reach the API` / connection errors | Backend not running or wrong `NEXT_PUBLIC_API_URL` | Run uvicorn; copy `frontend/.env.local.example` → `.env.local`; restart `npm run dev` |
 | 401 on `/chat` | Not signed in or expired token | Connect Zoho again |
 | Empty or wrong projects | Wrong `ZOHO_PORTAL_ID` | Use portal id from Projects URL/settings |
 
