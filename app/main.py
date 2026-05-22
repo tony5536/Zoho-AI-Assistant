@@ -108,34 +108,51 @@ def create_app() -> FastAPI:
     # Register global exception handlers to prevent 500 crashes and return clean JSON errors
     from fastapi.responses import JSONResponse
     import httpx
+    import re
+
+    _AUTH_MARKERS = (
+        "Zoho OAuth error",
+        "Zoho API error",
+        "Zoho token refresh failed",
+        "refresh token is empty",
+        "no valid Zoho tokens",
+        "Please login again",
+    )
+
+    def _auth_runtime_response(err_msg: str) -> JSONResponse | None:
+        if not any(marker in err_msg for marker in _AUTH_MARKERS):
+            return None
+        status_code = 401 if (
+            "invalid_code" in err_msg
+            or "refresh token is empty" in err_msg
+            or "refresh failed" in err_msg
+            or "no valid Zoho tokens" in err_msg
+            or "Please login again" in err_msg
+        ) else 400
+        if status_code == 401:
+            user_match = re.search(r"(?:user\s+([^\s\(\):]+))", err_msg)
+            user_id = user_match.group(1) if user_match else "default"
+            logger.warning("Re-authorization required for user_id=%s due to: %s", user_id, err_msg)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "reauth_required": True,
+                    "login_url": f"/auth/login?user_id={user_id}",
+                    "detail": "Your Zoho session expired. Please reconnect.",
+                },
+            )
+        return JSONResponse(status_code=status_code, content={"detail": err_msg})
 
     @app.exception_handler(RuntimeError)
     async def runtime_error_handler(request: Request, exc: RuntimeError):
         logger.error("RuntimeError caught globally: %s", exc, exc_info=True)
         err_msg = str(exc)
-        if "Zoho OAuth error" in err_msg or "Zoho API error" in err_msg or "Zoho token refresh failed" in err_msg or "refresh token is empty" in err_msg:
-            # Use 401 for auth revocation/expiration, 400 for generic API failures
-            status_code = 401 if ("invalid_code" in err_msg or "refresh token is empty" in err_msg or "refresh failed" in err_msg) else 400
-            if status_code == 401:
-                import re
-                user_match = re.search(r"(?:user\s+([^\s\(\):]+))", err_msg)
-                user_id = user_match.group(1) if user_match else "default"
-                logger.warning("Re-authorization required for user_id=%s due to: %s", user_id, err_msg)
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "reauth_required": True,
-                        "login_url": f"/auth/login?user_id={user_id}",
-                        "detail": err_msg,
-                    },
-                )
-            return JSONResponse(
-                status_code=status_code,
-                content={"detail": err_msg},
-            )
+        auth_response = _auth_runtime_response(err_msg)
+        if auth_response is not None:
+            return auth_response
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Internal server error: {err_msg}"},
+            content={"detail": "Something went wrong. Please try again."},
         )
 
     @app.exception_handler(httpx.HTTPStatusError)
@@ -148,6 +165,26 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.response.status_code,
             content={"detail": f"Zoho Projects HTTP error: {detail}"},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        """Catch-all so handlers always return JSON (avoids proxy 'Failed to fetch')."""
+        from fastapi import HTTPException as FastAPIHTTPException
+        from fastapi.exceptions import RequestValidationError
+
+        if isinstance(exc, (FastAPIHTTPException, RequestValidationError)):
+            raise exc
+        if isinstance(exc, RuntimeError):
+            return await runtime_error_handler(request, exc)
+        logger.exception(
+            "Unhandled exception on %s %s",
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Something went wrong. Please try again."},
         )
 
     app.include_router(create_api_router())

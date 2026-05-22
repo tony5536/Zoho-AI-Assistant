@@ -1,4 +1,5 @@
 import { fetchAuthStatus, logoutUser } from "@/lib/api";
+import { startNewSessionOnLogin } from "@/lib/session";
 import { clearAuthFlag, getUserId, hasAuthFlag, setAuthFlag } from "@/lib/user";
 
 export type AuthCheckStatus = "loading" | "authenticated" | "unauthenticated";
@@ -12,6 +13,7 @@ export function consumeOAuthCallbackFromUrl(): "success" | "error" | null {
 
   if (authResult === "success") {
     setAuthFlag();
+    startNewSessionOnLogin();
   }
 
   if (
@@ -42,6 +44,13 @@ export async function resolveAuthStatus(): Promise<boolean> {
     return false;
   }
   return true;
+}
+
+/** Clear client auth after Zoho token revocation and send user to login. */
+export function redirectToZohoReconnect(): void {
+  if (typeof window === "undefined") return;
+  clearAuthFlag();
+  window.location.href = "/login?reauth=1";
 }
 
 /** Sign out on the server and clear all client auth/session state. */

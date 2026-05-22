@@ -156,14 +156,17 @@ async def callback(
         return RedirectResponse(url=f"{settings.frontend_url}?{params}")
 
     accounts_url = accounts_server or settings.zoho_accounts_url
+    new_refresh = tokens.get("refresh_token") or ""
     await token_store.save_tokens(
         user_id=state,
         access_token=tokens["access_token"],
-        refresh_token=tokens.get("refresh_token", ""),
+        refresh_token=new_refresh,
         expires_in=int(tokens.get("expires_in", 3600)),
         api_domain=tokens.get("api_domain"),
         accounts_url=accounts_url,
     )
+    if not new_refresh:
+        await token_store.clear_refresh_token(state)
 
     memory = request.app.state.memory
     await memory.restore_user_memory_on_login(state)

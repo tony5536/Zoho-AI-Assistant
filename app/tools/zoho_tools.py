@@ -1,6 +1,9 @@
+import re
 from contextvars import ContextVar
 
 import httpx
+
+_DISPLAY_TASK_KEY = re.compile(r"^TSK-\d+$", re.IGNORECASE)
 
 from app.models.tool_models import (
     DeleteTaskResult,
@@ -49,7 +52,8 @@ class ZohoTools:
         self._mock = MockDataStore() if store is None else store
 
     def get_task(self, task_id: str):
-        return self._mock.get_task(task_id, user_id=self._mock_user())
+        ref = task_id.upper() if _DISPLAY_TASK_KEY.match(task_id.strip()) else task_id
+        return self._mock.get_task(ref, user_id=self._mock_user())
 
     def _mock_user(self) -> str | None:
         return get_current_user()
@@ -103,6 +107,9 @@ class ZohoTools:
         )
 
     async def get_task_details(self, project_id: str, task_id: str) -> ToolResponse:
+        resolved = await self._resolve_task_ref(task_id, project_id)
+        if resolved:
+            task_id, project_id = resolved
         live = await self._live_call("get_task_details", project_id, task_id)
         if live is not None:
             return ToolResponse(tool="get_task_details", success=True, data=live)
@@ -191,7 +198,11 @@ class ZohoTools:
         priority: str | None = None,
         project_id: str | None = None,
     ) -> ToolResponse:
-        project_id = project_id or self._resolve_project_for_task(task_id)
+        resolved = await self._resolve_task_ref(task_id, project_id)
+        if resolved:
+            task_id, project_id = resolved
+        else:
+            project_id = project_id or self._resolve_project_for_task(task_id)
         if not project_id:
             return self._error("update_task", "TASK_NOT_FOUND", f"Task {task_id} not found.")
 
@@ -232,7 +243,11 @@ class ZohoTools:
         )
 
     async def delete_task(self, task_id: str, *, project_id: str | None = None) -> ToolResponse:
-        project_id = project_id or self._resolve_project_for_task(task_id)
+        resolved = await self._resolve_task_ref(task_id, project_id)
+        if resolved:
+            task_id, project_id = resolved
+        else:
+            project_id = project_id or self._resolve_project_for_task(task_id)
 
         uid = self._mock_user()
         mock_task = self._mock.get_task(task_id, user_id=uid)
@@ -393,8 +408,12 @@ class ZohoTools:
         return None
 
     async def _has_live(self) -> bool:
+        if self._settings.zoho_use_mock:
+            return False
         user_id = get_current_user()
         if not user_id:
+            return False
+        if await self._token_store.is_demo_user(user_id):
             return False
         return await self._token_store.has_valid_token(user_id)
 
@@ -409,8 +428,33 @@ class ZohoTools:
         return token, domain
 
     def _resolve_project_for_task(self, task_id: str) -> str | None:
-        task = self._mock.get_task(task_id, user_id=self._mock_user())
+        task = self.get_task(task_id)
         return task.project_id if task else None
+
+    async def _resolve_task_ref(
+        self, task_id: str, project_id: str | None = None
+    ) -> tuple[str, str] | None:
+        """Map display key (TSK-501) or API id to (api_task_id, project_id)."""
+        ref = task_id.strip()
+        if not ref:
+            return None
+        lookup = ref.upper() if _DISPLAY_TASK_KEY.match(ref) else ref
+        mock_task = self._mock.get_task(lookup, user_id=self._mock_user())
+        if mock_task:
+            return mock_task.task_id, mock_task.project_id
+
+        if not await self._has_live():
+            return None
+        try:
+            token, domain = await self._token_bundle()
+            return await self._client.find_task_reference(
+                token,
+                ref,
+                api_domain=domain,
+                project_id=project_id,
+            )
+        except Exception:
+            return None
 
     def _error(self, tool: ToolName, code: str, message: str) -> ToolResponse:
         return ToolResponse(

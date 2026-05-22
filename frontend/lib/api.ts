@@ -1,5 +1,11 @@
 import { API_BASE, HEALTH_URL } from "@/lib/config";
-import type { ChatRequest, ChatResponse, MemoryContextResponse } from "./types";
+import type {
+  ChatRequest,
+  ChatResponse,
+  MemoryContextResponse,
+  RecentSessionItem,
+  SessionRestoreResponse,
+} from "./types";
 
 if (typeof window !== "undefined") {
   console.debug("[api] API base URL:", API_BASE);
@@ -27,6 +33,15 @@ export type ApiDiagnostics = {
 
 const DEFAULT_RETRY_COUNT = 2;
 const RETRY_DELAY_MS = 400;
+export const REQUEST_TIMEOUT_MS = 90_000;
+export const GENERIC_REQUEST_ERROR = "Something went wrong. Please retry.";
+
+export type FetchOptions = {
+  retries?: number;
+  delayMs?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -44,39 +59,78 @@ function logWarn(message: string, extra?: Record<string, unknown>): void {
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
 /** Fetch with short retries for transient local dev network blips. */
 export async function fetchWithRetry(
   url: string,
   init?: RequestInit,
-  options?: { retries?: number; delayMs?: number }
+  options?: FetchOptions
 ): Promise<Response> {
   const retries = options?.retries ?? DEFAULT_RETRY_COUNT;
   const delayMs = options?.delayMs ?? RETRY_DELAY_MS;
+  const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const externalSignal = options?.signal;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : null;
+
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        if (timer) clearTimeout(timer);
+        throw new DOMException("Aborted", "AbortError");
+      }
+      externalSignal.addEventListener(
+        "abort",
+        () => controller.abort(),
+        { once: true }
+      );
+    }
+
     try {
-      logDebug(`fetch attempt ${attempt + 1}/${retries + 1}`, { url, method: init?.method ?? "GET" });
-      const res = await fetch(url, init);
+      logDebug(`fetch attempt ${attempt + 1}/${retries + 1}`, {
+        url,
+        method: init?.method ?? "GET",
+      });
+      const res = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+      });
       logDebug("fetch response", { url, status: res.status, ok: res.ok });
       return res;
     } catch (err) {
       lastError = err;
+      if (isAbortError(err)) {
+        if (externalSignal?.aborted) {
+          throw err;
+        }
+        lastError = new Error("Request timed out. Please try again.");
+      }
       logWarn("fetch failed", {
         url,
         apiBase: API_BASE,
         attempt: attempt + 1,
         error: err instanceof Error ? err.message : String(err),
         name: err instanceof Error ? err.name : undefined,
-        cause:
-          err instanceof Error && err.cause != null
-            ? String(err.cause)
-            : undefined,
-        stack: err instanceof Error ? err.stack : undefined,
       });
+      if (isAbortError(err) && externalSignal?.aborted) {
+        throw err;
+      }
       if (attempt < retries) {
         await sleep(delayMs);
       }
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -184,7 +238,7 @@ export async function diagnoseApiConnection(
 async function throwConnectionError(cause?: unknown): Promise<never> {
   const diagnosis = await diagnoseApiConnection(cause);
   logWarn("connection error", { diagnosis, cause });
-  throw new Error(diagnosis.message);
+  throw new Error(GENERIC_REQUEST_ERROR);
 }
 
 export async function fetchAuthStatus(userId: string): Promise<boolean> {
@@ -267,6 +321,170 @@ export async function startZohoLogin(userId: string): Promise<void> {
   window.location.href = data.authorization_url;
 }
 
+export const ZOHO_SESSION_EXPIRED_MESSAGE =
+  "Your Zoho session expired. Please reconnect.";
+
+export class ZohoReauthError extends Error {
+  readonly reauthRequired = true;
+
+  constructor(message = ZOHO_SESSION_EXPIRED_MESSAGE) {
+    super(message);
+    this.name = "ZohoReauthError";
+  }
+}
+
+/** Turn API error JSON into a short user-facing message. */
+export function parseApiError(text: string, status?: number): string {
+  if (status != null && status >= 500) {
+    return GENERIC_REQUEST_ERROR;
+  }
+  try {
+    const data = JSON.parse(text) as {
+      reauth_required?: boolean;
+      detail?: string;
+    };
+    if (data.reauth_required) {
+      return ZOHO_SESSION_EXPIRED_MESSAGE;
+    }
+    if (data.detail && typeof data.detail === "string") {
+      const detail = data.detail;
+      if (
+        detail.includes("Internal server error") ||
+        detail.includes("Zoho Projects HTTP error") ||
+        detail.startsWith("{")
+      ) {
+        return GENERIC_REQUEST_ERROR;
+      }
+      return detail;
+    }
+  } catch {
+    // not JSON
+  }
+  if (text.length > 200 || text.includes("Traceback")) {
+    return GENERIC_REQUEST_ERROR;
+  }
+  return text || GENERIC_REQUEST_ERROR;
+}
+
+/** Map any thrown fetch/chat error to an assistant-safe UI string. */
+export function toUserFacingError(err: unknown): string {
+  if (err instanceof ZohoReauthError) {
+    return ZOHO_SESSION_EXPIRED_MESSAGE;
+  }
+  if (isAbortError(err)) {
+    return GENERIC_REQUEST_ERROR;
+  }
+  if (err instanceof Error) {
+    const msg = err.message;
+    if (msg === ZOHO_SESSION_EXPIRED_MESSAGE) return msg;
+    if (
+      msg.includes("API proxy is up") ||
+      msg.includes("Failed to fetch") ||
+      msg.includes("Network error") ||
+      msg.includes("Cannot reach") ||
+      msg.includes("Internal server error") ||
+      msg.startsWith("{")
+    ) {
+      return GENERIC_REQUEST_ERROR;
+    }
+    if (msg === GENERIC_REQUEST_ERROR || msg.includes("Request timed out")) {
+      return GENERIC_REQUEST_ERROR;
+    }
+    return msg;
+  }
+  return GENERIC_REQUEST_ERROR;
+}
+
+function throwIfReauthRequired(text: string, status: number): void {
+  if (status !== 401) return;
+  try {
+    const data = JSON.parse(text) as { reauth_required?: boolean };
+    if (data.reauth_required) {
+      throw new ZohoReauthError();
+    }
+  } catch (err) {
+    if (err instanceof ZohoReauthError) throw err;
+  }
+}
+
+export async function deleteConversation(
+  userId: string,
+  sessionId: string
+): Promise<void> {
+  const params = new URLSearchParams({ user_id: userId });
+  let res: Response;
+  try {
+    res = await fetchWithRetry(
+      `${API_BASE}/memory/sessions/${encodeURIComponent(sessionId)}?${params}`,
+      { method: "DELETE" }
+    );
+  } catch (err) {
+    return await throwConnectionError(err);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(parseApiError(text) || "Could not delete conversation");
+  }
+}
+
+export async function deleteChatMessage(
+  userId: string,
+  messageId: number
+): Promise<void> {
+  const params = new URLSearchParams({ user_id: userId });
+  let res: Response;
+  try {
+    res = await fetchWithRetry(
+      `${API_BASE}/memory/messages/${messageId}?${params}`,
+      { method: "DELETE" }
+    );
+  } catch (err) {
+    return await throwConnectionError(err);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(parseApiError(text) || "Could not delete message");
+  }
+}
+
+export async function fetchRecentSessions(
+  userId: string
+): Promise<RecentSessionItem[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  let res: Response;
+  try {
+    res = await fetchWithRetry(`${API_BASE}/memory/recent-sessions?${params}`);
+  } catch (err) {
+    return await throwConnectionError(err);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Could not load recent sessions");
+  }
+  return res.json() as Promise<RecentSessionItem[]>;
+}
+
+export async function fetchSessionRestore(
+  userId: string,
+  sessionId?: string
+): Promise<SessionRestoreResponse> {
+  const params = new URLSearchParams({ user_id: userId });
+  if (sessionId) {
+    params.set("session_id", sessionId);
+  }
+  let res: Response;
+  try {
+    res = await fetchWithRetry(`${API_BASE}/memory/restore?${params}`);
+  } catch (err) {
+    return await throwConnectionError(err);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Could not restore session");
+  }
+  return res.json() as Promise<SessionRestoreResponse>;
+}
+
 export async function fetchMemoryContext(
   userId: string,
   sessionId: string
@@ -289,7 +507,8 @@ export async function fetchMemoryContext(
 }
 
 export async function sendChatMessage(
-  payload: ChatRequest
+  payload: ChatRequest,
+  options?: { signal?: AbortSignal }
 ): Promise<ChatResponse> {
   const url = `${API_BASE}/chat`;
 
@@ -302,18 +521,31 @@ export async function sendChatMessage(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       },
-      { retries: DEFAULT_RETRY_COUNT, delayMs: RETRY_DELAY_MS }
+      {
+        retries: DEFAULT_RETRY_COUNT,
+        delayMs: RETRY_DELAY_MS,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+        signal: options?.signal,
+      }
     );
   } catch (err) {
+    if (isAbortError(err) && options?.signal?.aborted) {
+      throw err;
+    }
     return await throwConnectionError(err);
   }
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Request failed (${res.status})`);
+    throwIfReauthRequired(text, res.status);
+    throw new Error(parseApiError(text, res.status));
   }
 
-  return res.json() as Promise<ChatResponse>;
+  try {
+    return (await res.json()) as ChatResponse;
+  } catch {
+    throw new Error(GENERIC_REQUEST_ERROR);
+  }
 }
 
 /** Strip internal project-id prefixes from assistant replies for display. */

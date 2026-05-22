@@ -1,7 +1,28 @@
 import logging
+import re
 from typing import Any
 
 import httpx
+
+_DISPLAY_TASK_KEY = re.compile(r"^TSK-\d+$", re.IGNORECASE)
+
+
+def _task_ref_matches(raw: dict, ref: str, ref_upper: str) -> bool:
+    api_id = str(raw.get("id_string") or raw.get("id") or "")
+    if api_id == ref or api_id.upper() == ref_upper:
+        return True
+    key = raw.get("key") or raw.get("task_key")
+    if key and str(key).upper() == ref_upper:
+        return True
+    prefix = raw.get("prefix") or raw.get("task_prefix") or "TSK"
+    number = raw.get("number") or raw.get("task_number")
+    if number is not None:
+        composite = f"{prefix}-{number}".upper()
+        if composite == ref_upper:
+            return True
+        if _DISPLAY_TASK_KEY.match(ref) and str(number) == ref_upper.split("-", 1)[-1]:
+            return True
+    return False
 
 from app.models.tool_models import (
     ListProjectsResult,
@@ -170,6 +191,52 @@ class ZohoClient:
         )
         tasks = [self._map_task(t, project_id) for t in payload.get("tasks", [])]
         return ListTasksResult(project_id=project_id, tasks=tasks, count=len(tasks))
+
+    async def find_task_reference(
+        self,
+        access_token: str,
+        task_ref: str,
+        *,
+        api_domain: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Resolve a display key (e.g. TSK-501) or API id to (api_task_id, project_id)."""
+        ref = task_ref.strip()
+        if not ref:
+            return None
+        ref_upper = ref.upper()
+
+        projects = await self.list_projects(access_token, api_domain=api_domain)
+        project_ids = (
+            [project_id]
+            if project_id
+            else [p.project_id for p in projects.projects]
+        )
+
+        for pid in project_ids:
+            payload = await self._request(
+                "GET",
+                f"/projects/{pid}/tasks/",
+                access_token,
+                api_domain=api_domain,
+                params={"owner": "all"},
+            )
+            for raw in payload.get("tasks", []):
+                if _task_ref_matches(raw, ref, ref_upper):
+                    return str(raw.get("id_string") or raw.get("id")), pid
+
+        if project_id:
+            try:
+                await self._request(
+                    "GET",
+                    f"/projects/{project_id}/tasks/{ref}/",
+                    access_token,
+                    api_domain=api_domain,
+                )
+                return ref, project_id
+            except httpx.HTTPStatusError:
+                pass
+        return None
 
     async def get_task_details(
         self,

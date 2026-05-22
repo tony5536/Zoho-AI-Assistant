@@ -30,6 +30,26 @@ export interface MemoryContextResponse {
   recent_queries?: string[];
 }
 
+export interface RecentSessionItem {
+  session_id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface SessionRestoreResponse {
+  user_id: string;
+  restored: boolean;
+  session_id?: string | null;
+  restore_message?: string | null;
+  welcome_message?: string | null;
+  messages: Array<{ id?: number | null; role: string; content: string }>;
+  project_context?: ProjectContext | null;
+  recent_projects?: Array<{ project_id: string; name: string }>;
+  last_active_project?: ProjectContext | null;
+  frequent_project?: ProjectContext | null;
+  recent_queries?: string[];
+}
+
 export interface ChatResponse {
   session_id: string;
   reply: string;
@@ -46,6 +66,7 @@ export type MessageRole = "user" | "assistant" | "status";
 
 export interface ChatMessage {
   id: string;
+  dbId?: number | null;
   role: MessageRole;
   content: string;
   status?: ResponseStatus;

@@ -23,6 +23,10 @@ def test_update_intent_parsing() -> None:
             "Set priority of TSK-101 to high",
             {"task_id": "TSK-101", "priority": "high"},
         ),
+        (
+            "update TSK-101 as In progress",
+            {"task_id": "TSK-101", "status": "in_progress"},
+        ),
     ]
     for msg, expected in cases:
         assert is_update_task_message(msg), msg

@@ -141,6 +141,11 @@ _UPDATE_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UPDATE_AS_STATUS_RE = re.compile(
+    r"\b(?:update|change|set)\s+(TSK-\d+)\s+as\s+(\w+(?:\s+\w+)?)",
+    re.IGNORECASE,
+)
+
 _SET_PRIORITY_RE = re.compile(
     r"\bset\s+priority\s+of\s+(TSK-\d+)\s+to\s+(\w+)",
     re.IGNORECASE,
@@ -174,6 +179,8 @@ def is_update_task_message(message: str) -> bool:
     if _DUE_DATE_RE.search(message):
         return True
     if _UPDATE_STATUS_RE.search(message):
+        return True
+    if _UPDATE_AS_STATUS_RE.search(message):
         return True
     if _SET_PRIORITY_RE.search(message):
         return True
@@ -230,6 +237,12 @@ def parse_update_task_params(message: str) -> dict[str, Any]:
     if status_update:
         params["task_id"] = status_update.group(1).upper()
         raw_status = status_update.group(2).strip().lower()
+        params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
+
+    as_status = _UPDATE_AS_STATUS_RE.search(message)
+    if as_status:
+        params["task_id"] = as_status.group(1).upper()
+        raw_status = as_status.group(2).strip().lower()
         params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
 
     set_priority = _SET_PRIORITY_RE.search(message)

@@ -6,11 +6,18 @@ from pathlib import Path
 import aiosqlite
 
 from app.models.tool_models import PendingAction, ProjectContext, RecentProject
+from app.utils.sqlite import configure_connection
 from app.models.user_memory import StoredMessage, UserMemorySnapshot
 
 _RECENT_QUERIES_LIMIT = 10
 _RECENT_MESSAGES_LIMIT = 10
 _PROJECT_ACCESS_LIMIT = 20
+_RESTORE_HISTORY_LIMIT = 50
+_RECENT_SESSIONS_LIMIT = 20
+_SESSION_TITLE_MAX_LEN = 72
+_RESTORE_CONTINUATION_MESSAGE = (
+    "Welcome back — continuing your previous session."
+)
 
 
 class MemoryManager:
@@ -71,6 +78,12 @@ class MemoryManager:
             )
             await db.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_messages_user
+                ON messages (user_id, id DESC)
+                """
+            )
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS recent_projects (
                     session_id TEXT PRIMARY KEY,
                     projects_json TEXT NOT NULL,
@@ -124,6 +137,174 @@ class MemoryManager:
                 """
             )
             await db.commit()
+            await configure_connection(db)
+
+    async def get_latest_session_id_for_user(self, user_id: str) -> str | None:
+        """Return the session_id of the user's most recent chat message."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT session_id FROM messages
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return row["session_id"]
+
+    async def user_owns_session(self, user_id: str, session_id: str) -> bool:
+        """True when the user has at least one message in the session."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                """
+                SELECT 1 FROM messages
+                WHERE user_id = ? AND session_id = ?
+                LIMIT 1
+                """,
+                (user_id, session_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def get_recent_sessions(
+        self,
+        user_id: str,
+        *,
+        limit: int = _RECENT_SESSIONS_LIMIT,
+    ) -> list[dict[str, str]]:
+        """
+        List recent chat sessions for a user (latest activity first).
+        Title is the first user message, or the latest user message if none at start.
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    m.session_id,
+                    MAX(m.created_at) AS updated_at,
+                    (
+                        SELECT content FROM messages m1
+                        WHERE m1.session_id = m.session_id
+                          AND m1.user_id = ?
+                          AND m1.role = 'user'
+                        ORDER BY m1.id ASC
+                        LIMIT 1
+                    ) AS first_user,
+                    (
+                        SELECT content FROM messages m2
+                        WHERE m2.session_id = m.session_id
+                          AND m2.user_id = ?
+                          AND m2.role = 'user'
+                        ORDER BY m2.id DESC
+                        LIMIT 1
+                    ) AS latest_user
+                FROM messages m
+                WHERE m.user_id = ?
+                GROUP BY m.session_id
+                ORDER BY MAX(m.id) DESC
+                LIMIT ?
+                """,
+                (user_id, user_id, user_id, limit),
+            )
+            rows = await cursor.fetchall()
+
+        sessions: list[dict[str, str]] = []
+        for row in rows:
+            raw_title = row["first_user"] or row["latest_user"] or row["session_id"]
+            sessions.append(
+                {
+                    "session_id": row["session_id"],
+                    "title": self._session_title(str(raw_title)),
+                    "updated_at": row["updated_at"] or "",
+                }
+            )
+        return sessions
+
+    async def delete_session(self, user_id: str, session_id: str) -> bool:
+        """Remove all stored data for a chat session owned by the user."""
+        if not await self.user_owns_session(user_id, session_id):
+            return False
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "DELETE FROM messages WHERE session_id = ? AND user_id = ?",
+                (session_id, user_id),
+            )
+            await db.execute(
+                "DELETE FROM session_context WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM recent_projects WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM pending_actions WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.commit()
+        return True
+
+    async def delete_message(self, user_id: str, message_id: int) -> bool:
+        """Delete a single chat message when it belongs to the user."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM messages WHERE id = ? AND user_id = ?",
+                (message_id, user_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def _session_title(content: str) -> str:
+        text = " ".join(content.split())
+        if len(text) <= _SESSION_TITLE_MAX_LEN:
+            return text
+        return text[: _SESSION_TITLE_MAX_LEN - 1].rstrip() + "…"
+
+    async def restore_user_session(
+        self,
+        user_id: str,
+        *,
+        session_id: str | None = None,
+        history_limit: int = _RESTORE_HISTORY_LIMIT,
+    ) -> dict[str, object] | None:
+        """
+        Restore a session for a user: chat history, project context,
+        and recent projects. Pending actions are cancelled (never auto-resumed).
+        When session_id is omitted, restores the latest session.
+        """
+        if session_id is None:
+            session_id = await self.get_latest_session_id_for_user(user_id)
+        elif not await self.user_owns_session(user_id, session_id):
+            return None
+
+        if session_id is None:
+            return None
+
+        await self.dismiss_pending_action(session_id)
+
+        history = await self.get_history(session_id, limit=history_limit)
+        project_context = await self.get_project_context(session_id)
+        if project_context is None:
+            project_context = await self.apply_user_memory_to_session(
+                user_id, session_id
+            )
+        recent_projects = await self.get_recent_projects(session_id)
+        snapshot = await self.restore_user_memory_on_login(user_id)
+
+        return {
+            "session_id": session_id,
+            "messages": history,
+            "project_context": project_context,
+            "recent_projects": recent_projects,
+            "snapshot": snapshot,
+            "restore_message": _RESTORE_CONTINUATION_MESSAGE,
+        }
 
     async def get_history(
         self,
@@ -134,7 +315,7 @@ class MemoryManager:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
-                SELECT role, content
+                SELECT id, role, content
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY id ASC
@@ -143,7 +324,14 @@ class MemoryManager:
                 (session_id, limit),
             )
             rows = await cursor.fetchall()
-            return [{"role": row["role"], "content": row["content"]} for row in rows]
+            return [
+                {
+                    "id": row["id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                }
+                for row in rows
+            ]
 
     async def append(
         self,
@@ -232,7 +420,15 @@ class MemoryManager:
             if row is None:
                 return []
             raw = json.loads(row["projects_json"])
-            return [RecentProject(**item) for item in raw]
+            return [self._parse_recent_project(item) for item in raw]
+
+    @staticmethod
+    def _parse_recent_project(item: dict) -> RecentProject:
+        """Accept legacy ``index`` field from older stored project lists."""
+        data = dict(item)
+        if "position" not in data and "index" in data:
+            data["position"] = data["index"]
+        return RecentProject(**data)
 
     async def create_pending_action(
         self,

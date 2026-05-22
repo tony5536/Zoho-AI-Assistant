@@ -3,6 +3,7 @@ import logging
 import aiosqlite
 
 from app.utils.config import Settings
+from app.utils.sqlite import configure_connection
 
 logger = logging.getLogger(__name__)
 
@@ -10,9 +11,15 @@ logger = logging.getLogger(__name__)
 class TokenStore:
     """Per-user OAuth tokens with automatic refresh."""
 
+    @staticmethod
+    def is_demo_access_token(access_token: str | None) -> bool:
+        """True for mock-login / demo OAuth placeholders (not real Zoho tokens)."""
+        return bool(access_token and access_token.startswith("mock-"))
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._db_path = settings.memory_db_path
+        self._reauth_required: set[str] = set()
 
     async def initialize(self) -> None:
         logger.info("Initializing TokenStore database at: %s", self._db_path)
@@ -38,6 +45,16 @@ class TokenStore:
                 await db.execute(
                     "ALTER TABLE oauth_tokens ADD COLUMN accounts_url TEXT"
                 )
+            await db.commit()
+            await configure_connection(db)
+
+    async def clear_refresh_token(self, user_id: str) -> None:
+        """Remove a stale refresh token after OAuth re-login without a new refresh."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE oauth_tokens SET refresh_token = '' WHERE user_id = ?",
+                (user_id,),
+            )
             await db.commit()
 
     async def save_tokens(
@@ -85,11 +102,20 @@ class TokenStore:
             )
             await db.commit()
             logger.info("Successfully saved/updated tokens in database for user_id=%s", user_id)
+        self._reauth_required.discard(user_id)
+
+    async def is_demo_user(self, user_id: str) -> bool:
+        record = await self._get_record(user_id)
+        if record is None:
+            return False
+        return self.is_demo_access_token(record.get("access_token"))
 
     async def has_valid_token(self, user_id: str) -> bool:
         record = await self._get_record(user_id)
         if record is None:
             return False
+        if self.is_demo_access_token(record.get("access_token")):
+            return True
         # Valid token is present and not expired
         return not self.is_token_expired(record)
 
@@ -101,10 +127,15 @@ class TokenStore:
 
     async def ensure_valid_access_token(self, user_id: str, auth_service) -> str | None:
         """Return a usable access token, refreshing silently when expired."""
+        if user_id in self._reauth_required:
+            logger.info("Skipping token refresh for user_id=%s (reauth required)", user_id)
+            return None
         record = await self._get_record(user_id)
         if record is None:
             logger.warning("No tokens record found in database for user_id=%s", user_id)
             return None
+        if self.is_demo_access_token(record.get("access_token")):
+            return record["access_token"]
         if not self.is_token_expired(record):
             return record["access_token"]
         logger.info("Token expired for user_id=%s, attempting silent refresh", user_id)
@@ -128,6 +159,7 @@ class TokenStore:
 
     async def delete_tokens(self, user_id: str) -> None:
         logger.warning("Deleting Zoho tokens from database for user_id=%s", user_id)
+        self._reauth_required.add(user_id)
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("DELETE FROM oauth_tokens WHERE user_id = ?", (user_id,))
             await db.commit()
@@ -137,7 +169,12 @@ class TokenStore:
         self, user_id: str, auth_service, record: dict
     ) -> str | None:
         logger.info("Executing silent access token refresh for user_id=%s", user_id)
-        if not record.get("refresh_token"):
+        if self.is_demo_access_token(record.get("access_token")):
+            return record["access_token"]
+        refresh_value = record.get("refresh_token") or ""
+        if refresh_value.startswith("mock-"):
+            return record["access_token"]
+        if not refresh_value:
             logger.error("No refresh token found for user_id=%s. Stored refresh token is empty.", user_id)
             await self.delete_tokens(user_id)
             raise RuntimeError(

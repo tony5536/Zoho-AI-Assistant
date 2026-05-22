@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { mockLogin } from "@/lib/api";
 import { getZohoAuthRedirectUrl } from "@/lib/auth-url";
+import { startNewSessionOnLogin } from "@/lib/session";
 import { getUserId, setAuthFlag, setUserId } from "@/lib/user";
 
 export function LoginPage() {
@@ -16,6 +17,11 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (searchParams.get("reauth") === "1") {
+      setError("Your Zoho session expired. Please reconnect.");
+      window.history.replaceState({}, "", "/login");
+      return;
+    }
     if (searchParams.get("auth") === "error") {
       setError(
         "Zoho sign-in did not complete. Please try again — avoid refreshing during login."
@@ -32,6 +38,7 @@ export function LoginPage() {
       const user = await mockLogin(username.trim(), password);
       setUserId(user.user_id);
       setAuthFlag();
+      startNewSessionOnLogin();
       router.replace("/");
     } catch (err) {
       const message =

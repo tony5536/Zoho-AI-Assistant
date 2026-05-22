@@ -301,9 +301,8 @@ class QueryAgent(BaseAgent):
 
     def _unresolved_project_hint(self) -> str:
         return (
-            "I couldn't resolve which project you mean. "
-            'List projects first, then try "show tasks for the first one", '
-            '"current project", or "PRJ-001".'
+            "I couldn't determine which project you meant. "
+            "Please specify the project name."
         )
 
     def _error(self, message: str) -> dict[str, Any]:

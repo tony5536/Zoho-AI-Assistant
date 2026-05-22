@@ -3,7 +3,7 @@ from typing import Literal
 
 from app.models.tool_models import ProjectContext, RecentProject
 
-ProjectRef = Literal["first", "second", "third", "current", "that"]
+ProjectRef = Literal["first", "second", "third", "last", "current", "that"]
 
 _ORDINAL_INDEX: dict[ProjectRef, int] = {
     "first": 0,
@@ -36,6 +36,7 @@ _REF_PATTERNS: list[tuple[re.Pattern[str], ProjectRef]] = [
     (re.compile(r"\b(first|1st)\b(?:\s+(one|project))?", re.I), "first"),
     (re.compile(r"\b(second|2nd)\b(?:\s+(one|project))?", re.I), "second"),
     (re.compile(r"\b(third|3rd)\b(?:\s+(one|project))?", re.I), "third"),
+    (re.compile(r"\b(last)\b(?:\s+(one|project))?", re.I), "last"),
     (re.compile(r"\b(current|this)\s+project\b", re.I), "current"),
     (re.compile(r"\b(that|the)\s+project\b", re.I), "that"),
     (re.compile(r"\b(that|the)\s+one\b", re.I), "that"),
@@ -82,6 +83,11 @@ def resolve_project_id(
             return recent[index].project_id
         return None
 
+    if ref == "last":
+        if recent:
+            return recent[-1].project_id
+        return None
+
     if ref == "current":
         if project_context:
             return project_context.project_id
@@ -102,7 +108,9 @@ def resolve_project_id(
 
 def _implies_current_project(message: str) -> bool:
     lower = message.lower()
-    return any(
+    if extract_project_ref(message) is not None:
+        return False
+    if any(
         phrase in lower
         for phrase in (
             "list tasks",
@@ -111,4 +119,22 @@ def _implies_current_project(message: str) -> bool:
             "tasks in",
             "tasks from",
         )
-    ) and extract_project_ref(message) is None
+    ):
+        return True
+    return is_contextual_task_filter(lower)
+
+
+def is_contextual_task_filter(lower: str) -> bool:
+    """Follow-up filters (e.g. overdue only) that keep the active project."""
+    if "project" in lower and any(
+        cue in lower for cue in ("list projects", "show projects", "my projects", "which projects")
+    ):
+        return False
+    has_filter = any(
+        token in lower
+        for token in ("overdue", "open", "in progress", "completed", "on hold", "only")
+    )
+    has_task_cue = any(
+        token in lower for token in ("task", "ones", "those", "them")
+    )
+    return has_filter and (has_task_cue or "only" in lower)

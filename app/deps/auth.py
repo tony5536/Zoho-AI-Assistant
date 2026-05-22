@@ -18,13 +18,16 @@ async def require_chat_user(request: Request, body: ChatRequest) -> str:
         )
 
     token_store = request.app.state.token_store
+    if await token_store.is_demo_user(body.user_id):
+        return body.user_id
+
     auth_service = request.app.state.zoho_auth
     try:
         token = await token_store.ensure_valid_access_token(body.user_id, auth_service)
         if not token:
-            raise HTTPException(
-                status_code=401,
-                detail="Not authenticated with Zoho. Visit /auth/login to connect.",
+            raise RuntimeError(
+                f"Cannot refresh access token for user {body.user_id}: "
+                "no valid Zoho tokens. Please login again."
             )
     except RuntimeError:
         raise

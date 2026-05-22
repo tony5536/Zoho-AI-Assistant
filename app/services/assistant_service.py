@@ -1,8 +1,32 @@
+import logging
+
 from app.graph.workflow import AssistantWorkflow
 from app.memory.manager import MemoryManager
 from app.models.requests import ChatRequest
 from app.models.responses import ChatResponse, ResponseStatus
 from app.tools.zoho_tools import ZohoTools, set_current_user
+
+logger = logging.getLogger(__name__)
+
+_AUTH_ERROR_MARKERS = (
+    "Zoho OAuth error",
+    "Zoho API error",
+    "Zoho token refresh failed",
+    "refresh token is empty",
+    "no valid Zoho tokens",
+    "Please login again",
+)
+
+_SAFE_CHAT_ERROR_REPLY = (
+    "Something went wrong while processing your message. Please try again."
+)
+
+
+def _is_auth_runtime_error(exc: BaseException) -> bool:
+    if not isinstance(exc, RuntimeError):
+        return False
+    msg = str(exc)
+    return any(marker in msg for marker in _AUTH_ERROR_MARKERS)
 
 
 class AssistantService:
@@ -19,8 +43,30 @@ class AssistantService:
         self._workflow = workflow or AssistantWorkflow(tools=tools, memory=memory)
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
+        """Run chat with a safe boundary so tool/workflow failures never crash /chat."""
         set_current_user(request.user_id)
+        try:
+            return await self._chat_impl(request)
+        except Exception as exc:
+            if _is_auth_runtime_error(exc):
+                raise
+            logger.exception(
+                "Unhandled chat error session_id=%s user_id=%s",
+                request.session_id,
+                request.user_id,
+            )
+            project_context = await self._memory.get_project_context(request.session_id)
+            return ChatResponse(
+                session_id=request.session_id,
+                reply=_SAFE_CHAT_ERROR_REPLY,
+                agent="system",
+                status="error",
+                requires_confirmation=False,
+                pending_action=None,
+                project_context=project_context,
+            )
 
+    async def _chat_impl(self, request: ChatRequest) -> ChatResponse:
         if request.cancel:
             await self._memory.dismiss_pending_action(
                 request.session_id,

@@ -40,6 +40,15 @@ def test_resolve_unit() -> None:
             RecentProject(project_id="PRJ-003", name="C", position=3),
         ],
     ) == "PRJ-003"
+    assert extract_project_ref("tasks for the last one") == "last"
+    assert (
+        resolve_project_id(
+            "tasks for the last one",
+            project_ref="last",
+            recent_projects=recent,
+        )
+        == "PRJ-002"
+    )
     print("unit: ok")
 
 
@@ -68,6 +77,21 @@ async def test_integration() -> None:
     assert r3.status == "ok", r3.reply
     assert r3.data and r3.data["data"]["project_id"] == "PRJ-002"
     print("integration project two:", r3.data["data"]["project_id"])
+
+    sid2 = "ref-session-overdue"
+    await service.chat(
+        ChatRequest(message="What projects do I have?", session_id=sid2)
+    )
+    r4 = await service.chat(
+        ChatRequest(message="Show tasks for the first one", session_id=sid2)
+    )
+    assert r4.status == "ok", r4.reply
+    r5 = await service.chat(
+        ChatRequest(message="Show only overdue ones", session_id=sid2)
+    )
+    assert r5.status == "ok", r5.reply
+    assert r5.project_context and r5.project_context.project_id == "PRJ-001"
+    print("integration overdue filter:", r5.reply.split("\n")[0])
 
     print("All reference tests passed.")
 

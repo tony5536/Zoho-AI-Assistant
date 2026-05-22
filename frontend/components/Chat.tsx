@@ -2,15 +2,32 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { signOut } from "@/lib/auth-client";
-import { displayReply, fetchMemoryContext, sendChatMessage } from "@/lib/api";
-import { getSessionId, resetSessionId } from "@/lib/session";
+import { redirectToZohoReconnect, signOut } from "@/lib/auth-client";
+import {
+  deleteChatMessage,
+  deleteConversation,
+  displayReply,
+  fetchRecentSessions,
+  fetchSessionRestore,
+  sendChatMessage,
+  toUserFacingError,
+  ZohoReauthError,
+  ZOHO_SESSION_EXPIRED_MESSAGE,
+} from "@/lib/api";
+import {
+  consumeFreshLoginFlag,
+  ensureSessionId,
+  persistSessionId,
+  resetSessionId,
+} from "@/lib/session";
 import { getUserId } from "@/lib/user";
 import type {
   ChatMessage,
   ChatResponse,
   PendingAction,
   ProjectContext,
+  RecentSessionItem,
+  SessionRestoreResponse,
 } from "@/lib/types";
 
 function uid(): string {
@@ -41,38 +58,114 @@ export function Chat() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(
     null
   );
+  const [recentSessions, setRecentSessions] = useState<RecentSessionItem[]>(
+    []
+  );
+  const [restoringSession, setRestoringSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
+    null
+  );
   const bottomRef = useRef<HTMLDivElement>(null);
+  const chatRequestSeqRef = useRef(0);
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const restoreAbortRef = useRef<AbortController | null>(null);
+
+  const cancelInFlightChat = useCallback(() => {
+    chatRequestSeqRef.current += 1;
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+  }, []);
+
+  const buildMessagesFromRestore = useCallback(
+    (restore: SessionRestoreResponse): ChatMessage[] => {
+      const history: ChatMessage[] = restore.messages.map((m) => ({
+        id: uid(),
+        dbId: m.id ?? null,
+        role: m.role as ChatMessage["role"],
+        content:
+          m.role === "assistant" ? displayReply(m.content) : m.content,
+      }));
+
+      if (restore.restored && restore.restore_message) {
+        return [
+          {
+            id: uid(),
+            role: "assistant",
+            content: restore.restore_message,
+          },
+          ...history,
+        ];
+      }
+      if (history.length > 0) {
+        return history;
+      }
+      return [{ id: uid(), role: "assistant", content: DEFAULT_WELCOME }];
+    },
+    []
+  );
+
+  const applySessionRestore = useCallback(
+    (restore: SessionRestoreResponse, fallbackSessionId: string) => {
+      const resolvedSid = restore.session_id ?? fallbackSessionId;
+      persistSessionId(resolvedSid);
+      setSessionId(resolvedSid);
+      setProjectContext(restore.project_context ?? null);
+      setPendingAction(null);
+      setMessages(buildMessagesFromRestore(restore));
+    },
+    [buildMessagesFromRestore]
+  );
+
+  const loadRecentSessions = useCallback(async (uidVal: string) => {
+    try {
+      const sessions = await fetchRecentSessions(uidVal);
+      setRecentSessions(sessions);
+    } catch {
+      setRecentSessions([]);
+    }
+  }, []);
 
   useEffect(() => {
-    const sid = getSessionId();
+    const sid = ensureSessionId();
     const uidVal = getUserId();
     setSessionId(sid);
     setUserId(uidVal);
 
     let cancelled = false;
+    restoreAbortRef.current?.abort();
+    const restoreController = new AbortController();
+    restoreAbortRef.current = restoreController;
+
     (async () => {
-      let welcome = DEFAULT_WELCOME;
-      try {
-        const ctx = await fetchMemoryContext(uidVal, sid);
-        if (cancelled) return;
-        if (ctx.welcome_message) {
-          welcome = `${ctx.welcome_message}\n\n${DEFAULT_WELCOME}`;
+      void loadRecentSessions(uidVal);
+      if (consumeFreshLoginFlag()) {
+        if (!cancelled) {
+          setMessages([
+            { id: uid(), role: "assistant", content: DEFAULT_WELCOME },
+          ]);
+          setProjectContext(null);
+          setPendingAction(null);
         }
-        if (ctx.project_context) {
-          setProjectContext(ctx.project_context);
-        }
-      } catch {
-        /* use default welcome when memory API is unavailable */
+        return;
       }
-      if (!cancelled) {
-        setMessages([{ id: uid(), role: "assistant", content: welcome }]);
+      try {
+        const restore = await fetchSessionRestore(uidVal, sid);
+        if (cancelled || restoreController.signal.aborted) return;
+        applySessionRestore(restore, sid);
+      } catch {
+        if (!cancelled && !restoreController.signal.aborted) {
+          setMessages([
+            { id: uid(), role: "assistant", content: DEFAULT_WELCOME },
+          ]);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
+      restoreController.abort();
     };
-  }, []);
+  }, [applySessionRestore, loadRecentSessions]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -103,34 +196,64 @@ export function Chat() {
       cancel?: boolean;
       action_id?: string;
     }) => {
-      if (!sessionId || !userId) return;
+      const activeSessionId = ensureSessionId();
+      if (!activeSessionId || !userId) return;
+      if (activeSessionId !== sessionId) {
+        setSessionId(activeSessionId);
+      }
+
+      const requestId = ++chatRequestSeqRef.current;
+      chatAbortRef.current?.abort();
+      const controller = new AbortController();
+      chatAbortRef.current = controller;
+
       setError(null);
       setLoading(true);
 
       try {
-        const response = await sendChatMessage({
-          message: body.message,
-          session_id: sessionId,
-          user_id: userId,
-          confirm: body.confirm ?? false,
-          cancel: body.cancel ?? false,
-          action_id: body.action_id ?? null,
-        });
+        const response = await sendChatMessage(
+          {
+            message: body.message,
+            session_id: activeSessionId,
+            user_id: userId,
+            confirm: body.confirm ?? false,
+            cancel: body.cancel ?? false,
+            action_id: body.action_id ?? null,
+          },
+          { signal: controller.signal }
+        );
+        if (
+          requestId !== chatRequestSeqRef.current ||
+          controller.signal.aborted
+        ) {
+          return;
+        }
         applyResponse(response);
+        void loadRecentSessions(userId);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Something went wrong";
-        setError(msg);
+        if (controller.signal.aborted || requestId !== chatRequestSeqRef.current) {
+          return;
+        }
+        if (err instanceof ZohoReauthError) {
+          setError(ZOHO_SESSION_EXPIRED_MESSAGE);
+          redirectToZohoReconnect();
+          return;
+        }
+        setError(toUserFacingError(err));
       } finally {
-        setLoading(false);
+        if (requestId === chatRequestSeqRef.current) {
+          setLoading(false);
+          chatAbortRef.current = null;
+        }
       }
     },
-    [sessionId, userId, applyResponse]
+    [sessionId, userId, applyResponse, loadRecentSessions]
   );
 
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || loading || restoringSession) return;
 
     setMessages((prev) => [
       ...prev,
@@ -160,6 +283,7 @@ export function Chat() {
   };
 
   const handleNewSession = () => {
+    cancelInFlightChat();
     const id = resetSessionId();
     setSessionId(id);
     setMessages([
@@ -174,6 +298,55 @@ export function Chat() {
     setError(null);
   };
 
+  const handleDeleteMessage = async (message: ChatMessage) => {
+    setMessages((prev) => prev.filter((m) => m.id !== message.id));
+    if (message.dbId != null && userId) {
+      try {
+        await deleteChatMessage(userId, message.dbId);
+      } catch (err) {
+        setError(toUserFacingError(err));
+      }
+    }
+  };
+
+  const handleDeleteRecentSession = async (
+    targetSessionId: string,
+    e: React.MouseEvent
+  ) => {
+    e.stopPropagation();
+    if (!userId || deletingSessionId) return;
+    setDeletingSessionId(targetSessionId);
+    setError(null);
+    try {
+      await deleteConversation(userId, targetSessionId);
+      setRecentSessions((prev) =>
+        prev.filter((s) => s.session_id !== targetSessionId)
+      );
+      if (targetSessionId === sessionId) {
+        handleNewSession();
+      }
+    } catch (err) {
+      setError(toUserFacingError(err));
+    } finally {
+      setDeletingSessionId(null);
+    }
+  };
+
+  const handleSelectRecent = async (targetSessionId: string) => {
+    if (!userId || targetSessionId === sessionId || restoringSession) return;
+    cancelInFlightChat();
+    setRestoringSession(true);
+    setError(null);
+    try {
+      const restore = await fetchSessionRestore(userId, targetSessionId);
+      applySessionRestore(restore, targetSessionId);
+    } catch (err) {
+      setError(toUserFacingError(err));
+    } finally {
+      setRestoringSession(false);
+    }
+  };
+
   const handleLogout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -182,13 +355,76 @@ export function Chat() {
       await signOut();
       router.replace("/login");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sign out");
+      setError(toUserFacingError(err));
       setLoggingOut(false);
     }
   };
 
   return (
-    <div className="app-shell flex h-screen flex-col">
+    <div className="app-shell flex h-screen">
+      <aside className="flex w-52 shrink-0 flex-col border-r border-surface-border bg-surface-raised sm:w-56">
+        <div className="border-b border-surface-border p-3">
+          <button
+            type="button"
+            onClick={handleNewSession}
+            disabled={loggingOut || restoringSession}
+            className="w-full rounded-lg border border-surface-border px-3 py-2 text-left text-xs font-medium text-neutral-300 transition-colors hover:border-neutral-500 hover:bg-neutral-900/60 hover:text-white disabled:opacity-50"
+          >
+            New Session
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <p className="mb-2 px-1 text-[10px] font-medium uppercase tracking-widest text-neutral-500">
+            Recent Conversations
+          </p>
+          {recentSessions.length === 0 ? (
+            <p className="px-1 text-xs text-neutral-600">No prior chats yet</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {recentSessions.map((item) => {
+                const active = item.session_id === sessionId;
+                const deleting = deletingSessionId === item.session_id;
+                return (
+                  <li key={item.session_id} className="group flex items-center gap-0.5">
+                    <button
+                      type="button"
+                      onClick={() => void handleSelectRecent(item.session_id)}
+                      disabled={
+                        loading ||
+                        restoringSession ||
+                        active ||
+                        deletingSessionId !== null
+                      }
+                      title={item.title}
+                      className={`min-w-0 flex-1 truncate rounded-lg px-2 py-1.5 text-left text-xs transition-colors disabled:cursor-default disabled:opacity-60 ${
+                        active
+                          ? "bg-neutral-800 text-white"
+                          : "text-neutral-400 hover:bg-neutral-900/60 hover:text-neutral-200"
+                      }`}
+                    >
+                      {item.title}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) =>
+                        void handleDeleteRecentSession(item.session_id, e)
+                      }
+                      disabled={deleting || deletingSessionId !== null}
+                      aria-label={`Delete conversation: ${item.title}`}
+                      title="Delete conversation"
+                      className="shrink-0 rounded-md p-1.5 text-neutral-600 opacity-0 transition-opacity hover:bg-neutral-900/80 hover:text-neutral-300 group-hover:opacity-100 disabled:opacity-40"
+                    >
+                      <RecycleBinIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
       <header className="shrink-0 border-b border-surface-border bg-surface-raised">
         <div className="mx-auto flex max-w-2xl flex-col gap-3 px-4 py-3.5 sm:px-5">
           <div className="flex items-center justify-between gap-3">
@@ -207,14 +443,6 @@ export function Chat() {
               </div>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={handleNewSession}
-                disabled={loggingOut}
-                className="rounded-lg border border-surface-border px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:border-neutral-500 hover:bg-neutral-900/60 hover:text-white disabled:opacity-50"
-              >
-                New session
-              </button>
               <button
                 type="button"
                 onClick={handleLogout}
@@ -243,9 +471,14 @@ export function Chat() {
       <main className="flex min-h-0 flex-1 flex-col">
         <div className="messages-scroll mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 overflow-y-auto px-4 py-8 sm:px-5">
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onDelete={() => void handleDeleteMessage(msg)}
+              disabled={loading || restoringSession}
+            />
           ))}
-          {loading && <LoadingBubble />}
+          {(loading || restoringSession) && <LoadingBubble />}
           <div ref={bottomRef} className="h-2 shrink-0" />
         </div>
 
@@ -279,12 +512,12 @@ export function Chat() {
                     ? "Or type a new message…"
                     : "Message your assistant…"
                 }
-                disabled={loading}
+                disabled={loading || restoringSession}
                 className="min-w-0 flex-1 rounded-xl border border-surface-border bg-black px-4 py-3 text-[15px] leading-snug text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-50"
               />
               <button
                 type="submit"
-                disabled={loading || !input.trim()}
+                disabled={loading || restoringSession || !input.trim()}
                 className="shrink-0 rounded-xl bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Send
@@ -293,6 +526,7 @@ export function Chat() {
           </div>
         </div>
       </main>
+      </div>
     </div>
   );
 }
@@ -403,7 +637,68 @@ function AssistantAvatar() {
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function RecycleBinIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M4 7h16" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
+
+function MessageLabelBar({
+  label,
+  align,
+  onDelete,
+  disabled,
+}: {
+  label: string;
+  align: "left" | "right";
+  onDelete: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 ${align === "right" ? "justify-end pr-1" : ""}`}
+    >
+      <span className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={disabled}
+        aria-label={`Delete ${label.toLowerCase()} message`}
+        title="Delete message"
+        className="rounded p-0.5 text-neutral-600 transition-colors hover:bg-neutral-800 hover:text-neutral-300 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <RecycleBinIcon className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  onDelete,
+  disabled,
+}: {
+  message: ChatMessage;
+  onDelete: () => void;
+  disabled?: boolean;
+}) {
   if (message.role === "status") {
     return (
       <p className="text-center text-xs text-neutral-600">{message.content}</p>
@@ -415,9 +710,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   if (isUser) {
     return (
       <div className="flex flex-col items-end gap-1.5">
-        <span className="pr-1 text-[11px] font-medium uppercase tracking-wider text-neutral-500">
-          You
-        </span>
+        <MessageLabelBar
+          label="You"
+          align="right"
+          onDelete={onDelete}
+          disabled={disabled}
+        />
         <div className="max-w-[90%] rounded-2xl rounded-br-md border border-neutral-700 bg-neutral-800 px-4 py-3 text-[15px] leading-relaxed text-neutral-100 sm:max-w-[85%]">
           <p className="whitespace-pre-wrap">{message.content}</p>
         </div>
@@ -429,9 +727,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     <div className="flex gap-3">
       <AssistantAvatar />
       <div className="min-w-0 flex-1 space-y-1.5">
-        <span className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">
-          Assistant
-        </span>
+        <MessageLabelBar
+          label="Assistant"
+          align="left"
+          onDelete={onDelete}
+          disabled={disabled}
+        />
         <div
           className={`max-w-full rounded-2xl rounded-bl-md border px-4 py-3 text-[15px] leading-relaxed sm:max-w-[95%] ${
             message.status === "error"

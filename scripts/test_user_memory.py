@@ -96,6 +96,28 @@ async def test_invalid_project_not_restored() -> None:
         print("Invalid project restoration blocked: OK")
 
 
+async def test_session_restore_on_relogin() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "sess_restore.db"
+        memory = MemoryManager(db)
+        await memory.initialize()
+
+        user_id = "mock-alex"
+        session_id = "sess-relogin"
+        await memory.append(session_id, "user", "Show tasks", user_id=user_id)
+        await memory.append(session_id, "assistant", "Tasks listed.", user_id=user_id)
+        await memory.create_pending_action(
+            session_id, "create_task", "Create task", {"name": "x"}
+        )
+
+        restored = await memory.restore_user_session(user_id)
+        assert restored is not None
+        assert restored["session_id"] == session_id
+        assert len(restored["messages"]) == 2
+        assert await memory.get_latest_pending(session_id) is None
+        print("Session restore on relogin: OK")
+
+
 async def test_chat_persists_memory() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "chat_mem.db"
@@ -131,6 +153,7 @@ async def test_chat_persists_memory() -> None:
 async def main() -> None:
     await test_memory_manager_helpers()
     await test_invalid_project_not_restored()
+    await test_session_restore_on_relogin()
     await test_chat_persists_memory()
     print("All user memory tests passed.")
 

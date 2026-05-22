@@ -54,6 +54,47 @@ async def test_ensure_valid_access_token_refreshes_when_expired(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_demo_login_tokens_skip_live_zoho_refresh(tmp_path) -> None:
+    """Mock-login tokens must not call Zoho refresh (invalid_code on mock refresh)."""
+    settings = get_settings().model_copy(
+        update={"memory_db_path": tmp_path / "demo.db", "zoho_use_mock": False}
+    )
+    store = TokenStore(settings)
+    await store.initialize()
+    auth = ZohoAuthService(settings)
+    auth.refresh_token = AsyncMock(
+        side_effect=RuntimeError("Zoho OAuth error (invalid_code)")
+    )
+
+    await store.save_tokens(
+        user_id="mock-alex",
+        access_token="mock-demo-access",
+        refresh_token="mock-demo-refresh",
+        expires_in=1,
+    )
+    record = await store._get_record("mock-alex")
+    assert record is not None
+    record["expires_at"] = time.time() - 10
+    async with aiosqlite.connect(settings.memory_db_path) as db:
+        await db.execute(
+            "UPDATE oauth_tokens SET expires_at = ? WHERE user_id = ?",
+            (record["expires_at"], "mock-alex"),
+        )
+        await db.commit()
+
+    assert await store.is_demo_user("mock-alex")
+    token = await store.ensure_valid_access_token("mock-alex", auth)
+    assert token == "mock-demo-access"
+    auth.refresh_token.assert_not_awaited()
+
+    tools = create_zoho_tools(settings, store, auth)
+    set_current_user("mock-alex")
+    result = await tools.list_projects()
+    assert result.success
+    auth.refresh_token.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_mock_mode_skips_live_refresh(tmp_path) -> None:
     settings = get_settings().model_copy(
         update={"memory_db_path": tmp_path / "mock.db", "zoho_use_mock": True}
@@ -213,7 +254,7 @@ async def test_chat_endpoint_triggers_reauth_on_refresh_failure(tmp_path) -> Non
     payload = response.json()
     assert payload.get("reauth_required") is True
     assert payload.get("login_url") == "/auth/login?user_id=mock-jamie"
-    assert "Zoho token refresh failed" in payload.get("detail", "")
+    assert payload.get("detail") == "Your Zoho session expired. Please reconnect."
     
     # 5. Verify the token record has been deleted from the database
     record = await store._get_record("mock-jamie")
