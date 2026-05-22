@@ -55,6 +55,7 @@ class SupervisorAgent(BaseAgent):
             r"\bmark\b",
             r"\bassign\b",
             r"\bset\s+due\b",
+            r"\bset\s+priority\b",
             r"\bdue\s+date\b",
         )
         return any(re.search(pattern, message) for pattern in patterns)

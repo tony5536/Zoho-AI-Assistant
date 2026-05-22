@@ -76,12 +76,40 @@ class TokenStore:
         record = await self._get_record(user_id)
         return record is not None
 
-    async def get_access_token(self, user_id: str, auth_service) -> str | None:
+    def is_token_expired(self, record: dict) -> bool:
+        return record["expires_at"] <= time.time()
+
+    async def ensure_valid_access_token(self, user_id: str, auth_service) -> str | None:
+        """Return a usable access token, refreshing silently when expired."""
         record = await self._get_record(user_id)
         if record is None:
             return None
-        if record["expires_at"] > time.time():
+        if not self.is_token_expired(record):
             return record["access_token"]
+        return await self._refresh_access_token(user_id, auth_service, record)
+
+    async def refresh_access_token(self, user_id: str, auth_service) -> str | None:
+        """Force refresh using the stored refresh token."""
+        record = await self._get_record(user_id)
+        if record is None:
+            return None
+        return await self._refresh_access_token(user_id, auth_service, record)
+
+    async def get_access_token(self, user_id: str, auth_service) -> str | None:
+        return await self.ensure_valid_access_token(user_id, auth_service)
+
+    async def get_api_domain(self, user_id: str) -> str | None:
+        record = await self._get_record(user_id)
+        return record.get("api_domain") if record else None
+
+    async def delete_tokens(self, user_id: str) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM oauth_tokens WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    async def _refresh_access_token(
+        self, user_id: str, auth_service, record: dict
+    ) -> str | None:
         refreshed = await auth_service.refresh_token(
             record["refresh_token"],
             accounts_url=record.get("accounts_url"),
@@ -96,15 +124,6 @@ class TokenStore:
         )
         updated = await self._get_record(user_id)
         return updated["access_token"] if updated else None
-
-    async def get_api_domain(self, user_id: str) -> str | None:
-        record = await self._get_record(user_id)
-        return record.get("api_domain") if record else None
-
-    async def delete_tokens(self, user_id: str) -> None:
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("DELETE FROM oauth_tokens WHERE user_id = ?", (user_id,))
-            await db.commit()
 
     async def _get_record(self, user_id: str) -> dict | None:
         async with aiosqlite.connect(self._db_path) as db:

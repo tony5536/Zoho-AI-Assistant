@@ -1,5 +1,7 @@
 from contextvars import ContextVar
 
+import httpx
+
 from app.models.tool_models import (
     DeleteTaskResult,
     ListProjectMembersResult,
@@ -254,8 +256,8 @@ class ZohoTools:
 
         if await self._has_live():
             try:
-                token, domain = await self._token_bundle()
-                await self._client.delete_task(token, project_id, task_id, api_domain=domain)
+                await self._token_bundle()
+                await self._execute_live("delete_task", project_id, task_id)
                 return ToolResponse(
                     tool="delete_task",
                     success=True,
@@ -345,26 +347,47 @@ class ZohoTools:
         if self._settings.zoho_use_mock or not await self._has_live():
             return None
         try:
-            token, domain = await self._token_bundle()
-            if operation == "list_projects":
-                return await self._client.list_projects(token, api_domain=domain)
-            if operation == "list_tasks":
-                return await self._client.list_tasks(token, args[0], api_domain=domain, **kwargs)
-            if operation == "get_task_details":
-                return await self._client.get_task_details(token, args[0], args[1], api_domain=domain)
-            if operation == "list_project_members":
-                members = await self._client.list_project_members(token, args[0], api_domain=domain)
-                return ListProjectMembersResult(
-                    project_id=args[0], members=members, count=len(members)
-                )
-            if operation == "create_task":
-                return await self._client.create_task(token, args[0], args[1], api_domain=domain, **kwargs)
-            if operation == "update_task":
-                return await self._client.update_task(
-                    token, args[0], args[1], api_domain=domain, **kwargs
-                )
+            return await self._execute_live(operation, *args, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401:
+                return None
+            user_id = get_current_user()
+            if not user_id:
+                return None
+            await self._token_store.refresh_access_token(user_id, self._auth)
+            try:
+                return await self._execute_live(operation, *args, **kwargs)
+            except Exception:
+                return None
         except Exception:
             return None
+
+    async def _execute_live(self, operation: str, *args, **kwargs):
+        token, domain = await self._token_bundle()
+        if operation == "list_projects":
+            return await self._client.list_projects(token, api_domain=domain)
+        if operation == "list_tasks":
+            return await self._client.list_tasks(token, args[0], api_domain=domain, **kwargs)
+        if operation == "get_task_details":
+            return await self._client.get_task_details(
+                token, args[0], args[1], api_domain=domain
+            )
+        if operation == "list_project_members":
+            members = await self._client.list_project_members(token, args[0], api_domain=domain)
+            return ListProjectMembersResult(
+                project_id=args[0], members=members, count=len(members)
+            )
+        if operation == "create_task":
+            return await self._client.create_task(
+                token, args[0], args[1], api_domain=domain, **kwargs
+            )
+        if operation == "update_task":
+            return await self._client.update_task(
+                token, args[0], args[1], api_domain=domain, **kwargs
+            )
+        if operation == "delete_task":
+            await self._client.delete_task(token, args[0], args[1], api_domain=domain)
+            return True
         return None
 
     async def _has_live(self) -> bool:
@@ -377,7 +400,7 @@ class ZohoTools:
         user_id = get_current_user()
         if not user_id:
             raise RuntimeError("No authenticated user")
-        token = await self._token_store.get_access_token(user_id, self._auth)
+        token = await self._token_store.ensure_valid_access_token(user_id, self._auth)
         if not token:
             raise RuntimeError("No valid access token")
         domain = await self._token_store.get_api_domain(user_id)

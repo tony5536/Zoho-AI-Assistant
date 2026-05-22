@@ -136,6 +136,16 @@ _DUE_DATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UPDATE_STATUS_RE = re.compile(
+    r"\b(?:update|change|set)\s+(TSK-\d+)\s+status\s+to\s+(\w+(?:\s+\w+)?)",
+    re.IGNORECASE,
+)
+
+_SET_PRIORITY_RE = re.compile(
+    r"\bset\s+priority\s+of\s+(TSK-\d+)\s+to\s+(\w+)",
+    re.IGNORECASE,
+)
+
 _STATUS_ALIASES: dict[str, str] = {
     "complete": "completed",
     "completed": "completed",
@@ -162,6 +172,16 @@ def is_update_task_message(message: str) -> bool:
     if _PRIORITY_RE.search(message):
         return True
     if _DUE_DATE_RE.search(message):
+        return True
+    if _UPDATE_STATUS_RE.search(message):
+        return True
+    if _SET_PRIORITY_RE.search(message):
+        return True
+    if re.search(
+        r"\b(?:update|change|set)\s+(TSK-\d+)\b",
+        message,
+        re.IGNORECASE,
+    ):
         return True
     if any(
         phrase in lower
@@ -205,6 +225,17 @@ def parse_update_task_params(message: str) -> dict[str, Any]:
     if due:
         params["task_id"] = due.group(1).upper()
         params["due_date"] = due.group(2)
+
+    status_update = _UPDATE_STATUS_RE.search(message)
+    if status_update:
+        params["task_id"] = status_update.group(1).upper()
+        raw_status = status_update.group(2).strip().lower()
+        params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
+
+    set_priority = _SET_PRIORITY_RE.search(message)
+    if set_priority:
+        params["task_id"] = set_priority.group(1).upper()
+        params["priority"] = set_priority.group(2).strip().lower()
 
     if _UPDATE_TASK_RE.search(message):
         quoted = _extract_quoted(message)
@@ -259,6 +290,8 @@ def is_list_project_members_message(message: str) -> bool:
             "project members",
             "team members",
             "show members",
+            "show team",
+            "who are the members",
             "who is on",
             "who is in",
             "who's in",

@@ -24,22 +24,34 @@ A multi-agent assistant for **Zoho Projects** with OAuth sign-in, eight API tool
 ```
 ┌─────────────────┐     HTTP      ┌──────────────────────────────────────┐
 │  Next.js UI     │ ────────────► │  FastAPI                             │
-│  (port 3000)    │               │  /auth/*  /chat  /health             │
+│  (port 3000)    │               │  /auth/*  /chat  /health  /memory    │
 └─────────────────┘               └──────────────────┬───────────────────┘
                                                      │
                      ┌───────────────────────────────┼───────────────────────────────┐
                      ▼                               ▼                               ▼
             LangGraph supervisor              MemoryManager (SQLite)          TokenStore (SQLite)
-                     │                      sessions, context, HITL           OAuth per user_id
+                     │                   short-term: history, recent            OAuth per user_id
+                     │                   projects, project context, HITL          + silent refresh
+                     │                   long-term: user preferences
          ┌───────────┴───────────┐
          ▼                       ▼
    QueryAgent              ActionAgent
-   (read tools)            (write tools + HITL)
+   list_*, get_task_*      create/update/delete
+   list_project_members    (HITL before execute)
+   get_task_utilisation
          │                       │
          └───────────┬───────────┘
                      ▼
-              ZohoTools ──► ZohoClient (live)  or  MockDataStore
+              ZohoTools ──► ensure_valid_access_token() ──► ZohoClient (live)
+                     │         or MockDataStore (ZOHO_USE_MOCK)
+                     └─► 401 retry after refresh (live only)
 ```
+
+**Routing:** The supervisor uses keyword/regex cues (`update`, `assign`, `create`, … → ActionAgent; everything else → QueryAgent). Intent parsing in `app/utils/intent.py` and `task_intent.py` maps natural language to tool operations without an LLM.
+
+**HITL:** ActionAgent stages `pending_action` in SQLite; the client sends `confirm: true` and `action_id` to execute. Cancel dismisses without calling Zoho.
+
+**Tokens:** Before each live API call, `TokenStore.ensure_valid_access_token()` checks expiry, refreshes with the stored refresh token, persists the new access token, and retries once on HTTP 401. Mock mode skips OAuth entirely.
 
 ---
 
@@ -157,6 +169,8 @@ If login redirects to `accounts.zoho.in` but `.env` still points at `.com`, toke
 7. Restart uvicorn after any `.env` change.
 8. In the UI, click **Connect Zoho** — after approval you should land on `http://localhost:3000?auth=success`.
 
+**Token refresh:** You do not need to re-login when the access token expires. The backend refreshes automatically on the next chat or API call. If refresh fails (revoked app or invalid refresh token), use **Connect Zoho** again.
+
 ---
 
 ## API
@@ -220,10 +234,15 @@ Responses may include `status: "confirmation_required"`, `pending_action`, and `
 | `list projects` | Lists projects; stores recent list for “first one” references |
 | `use project PRJ-001` | Sets active project context |
 | `show tasks for the first one` | Tasks for first project in recent list |
-| `list members` | Members of active project |
-| `task details TSK-101` | Task detail for active project |
+| `Who are the members of PRJ-001?` | QueryAgent → `list_project_members` |
+| `Show team for the first project` | Members using session memory + recent projects |
+| `task details TSK-101` / `open task TSK-101` | QueryAgent → `get_task_details` |
+| `Update TSK-101 status to completed` | ActionAgent → HITL → confirm applies status |
+| `Assign TSK-101 to Alex Morgan` | HITL update assignee |
+| `Change due date of TSK-101 to 2026-06-01` | HITL update due date |
+| `Set priority of TSK-101 to high` | HITL update priority |
 | `Create a task called API Integration` | HITL card → Confirm runs create |
-| `who has the most tasks this month?` | Utilisation-style summary |
+| `who has the most tasks this month?` | Utilisation-style summary (QueryAgent) |
 
 ---
 
@@ -258,27 +277,44 @@ Before presenting, verify:
 
 ## Tests
 
-Smoke test (mock backend, no OAuth):
+Install test dependencies (included in `requirements.txt`):
+
+```bash
+pip install -r requirements.txt
+```
+
+Run the assignment test suite (mock mode, no OAuth):
 
 ```bash
 # Windows
-.venv\Scripts\python.exe scripts\smoke_test.py
+.venv\Scripts\python.exe -m pytest tests/ -v
 
 # macOS / Linux
-# .venv/bin/python scripts/smoke_test.py
+# .venv/bin/python -m pytest tests/ -v
 ```
 
-Covers: list projects, project context, list tasks, create task with HITL confirm.
+| Test file | Covers |
+|-----------|--------|
+| `tests/test_get_task_details.py` | Query routing, per-user access, formatted details |
+| `tests/test_update_task.py` | Action routing, HITL payload, confirm flow |
+| `tests/test_project_members.py` | Context resolution (“first project”), member list |
+| `tests/test_token_refresh.py` | `ensure_valid_access_token`, mock mode unchanged |
+
+Smoke test (end-to-end script):
+
+```bash
+.venv\Scripts\python.exe scripts\smoke_test.py
+```
 
 ---
 
-## Demo Prompts
+## Demo prompts (new capabilities)
 
-- What projects do I have?
-- Show tasks for the first one
-- Create a task called API Integration
-- Delete task #3
-- Who has the most tasks this month?
+- Show details for TSK-101
+- Update TSK-101 status to completed → confirm
+- Assign TSK-101 to Alex Morgan → confirm
+- Who are the members of PRJ-001?
+- Show team for the first project (after `list projects`)
 
 ## Project layout
 
@@ -292,7 +328,8 @@ zoho AI-Assistant/
 │   ├── services/        # OAuth, Zoho client, tokens, assistant
 │   └── tools/           # ZohoTools, mock data
 ├── frontend/            # Next.js chat UI
-├── scripts/             # smoke_test.py
+├── tests/               # pytest: task details, update, members, token refresh
+├── scripts/             # smoke_test.py, legacy script tests
 ├── data/                # SQLite DB (created at runtime)
 ├── .env.example         # Template only — use placeholders
 └── requirements.txt
@@ -300,12 +337,14 @@ zoho AI-Assistant/
 
 ---
 
-## Limitations
+## Known limitations
 
-- Intent routing uses **keywords and regex**, not an LLM (optional `OPENAI_API_KEY` is unused for routing today).
-- Live Zoho IDs and field shapes may differ from mock labels (`PRJ-001`, `TSK-101`).
-- Utilisation may use mock aggregation when the live API path is unavailable.
-- `ZOHO_USE_MOCK=true` is for local development only, not production.
+- Intent routing uses **keywords and regex**, not an LLM (`OPENAI_API_KEY` is optional and unused for routing).
+- Conversational phrasing outside the supported patterns may return `unknown` or a helpful error — extend `task_intent.py` / `intent.py` for new phrases.
+- Live Zoho task/project IDs and field names differ from mock labels (`PRJ-001`, `TSK-101`); map portal-specific ids in `.env`.
+- `get_task_utilisation` uses mock aggregation when live task detail is unavailable; org-wide analytics are unchanged by the new tools.
+- Token refresh requires a valid **offline** refresh token; revoking the OAuth app forces manual reconnect.
+- `ZOHO_USE_MOCK=true` bypasses OAuth and live API — for local development only, not production.
 
 ---
 

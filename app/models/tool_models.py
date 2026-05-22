@@ -35,8 +35,6 @@ class TaskSummary(BaseModel):
 
 class TaskDetails(TaskSummary):
     description: str = ""
-    due_date: str | None = None
-    priority: str | None = None
     created_time: str | None = None
 
 

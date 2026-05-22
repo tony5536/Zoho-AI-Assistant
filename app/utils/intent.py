@@ -213,6 +213,13 @@ def _extract_priority(lower: str) -> str | None:
 
 def _extract_update_due_date(text: str) -> str | None:
     match = re.search(
+        r"\b(?:change|set|update)\s+due\s+date\s+of\s+TSK-\d+\s+to\s+(\d{4}-\d{2}-\d{2})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    match = re.search(
         r"\b(?:due\s+date|due)\s+(?:of\s+TSK-\d+\s+)?to\s+(\d{4}-\d{2}-\d{2})\b",
         text,
         re.IGNORECASE,

@@ -254,8 +254,7 @@ class MockDataStore:
                 return TaskDetails(
                     **base,
                     description=task.get("description", ""),
-                    due_date=task.get("due_date"),
-                    priority=task.get("priority"),
+                    created_time=task.get("created_time"),
                 )
         return None
 
