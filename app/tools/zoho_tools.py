@@ -47,13 +47,16 @@ class ZohoTools:
         self._mock = MockDataStore() if store is None else store
 
     def get_task(self, task_id: str):
-        return self._mock.get_task(task_id)
+        return self._mock.get_task(task_id, user_id=self._mock_user())
+
+    def _mock_user(self) -> str | None:
+        return get_current_user()
 
     async def list_projects(self) -> ToolResponse:
         live = await self._live_call("list_projects")
         if live is not None:
             return ToolResponse(tool="list_projects", success=True, data=live)
-        projects = self._mock.list_projects()
+        projects = self._mock.list_projects(user_id=self._mock_user())
         return ToolResponse(
             tool="list_projects",
             success=True,
@@ -68,7 +71,8 @@ class ZohoTools:
         assignee: str | None = None,
         due_date: str | None = None,
     ) -> ToolResponse:
-        if not self._mock.get_project(project_id) and not await self._has_live():
+        uid = self._mock_user()
+        if not self._mock.get_project(project_id, user_id=uid) and not await self._has_live():
             return self._error("list_tasks", "PROJECT_NOT_FOUND", f"Project {project_id} not found.")
 
         live = await self._live_call(
@@ -81,9 +85,15 @@ class ZohoTools:
         if live is not None:
             return ToolResponse(tool="list_tasks", success=True, data=live)
 
-        if not self._mock.get_project(project_id):
+        if not self._mock.get_project(project_id, user_id=uid):
             return self._error("list_tasks", "PROJECT_NOT_FOUND", f"Project {project_id} not found.")
-        tasks = self._mock.list_tasks(project_id, status=status, assignee=assignee, due_date=due_date)
+        tasks = self._mock.list_tasks(
+            project_id,
+            user_id=uid,
+            status=status,
+            assignee=assignee,
+            due_date=due_date,
+        )
         return ToolResponse(
             tool="list_tasks",
             success=True,
@@ -95,7 +105,7 @@ class ZohoTools:
         if live is not None:
             return ToolResponse(tool="get_task_details", success=True, data=live)
 
-        details = self._mock.get_task_details(project_id, task_id)
+        details = self._mock.get_task_details(project_id, task_id, user_id=self._mock_user())
         if details is None:
             return self._error("get_task_details", "TASK_NOT_FOUND", f"Task {task_id} not found.")
         return ToolResponse(tool="get_task_details", success=True, data=details)
@@ -105,13 +115,14 @@ class ZohoTools:
         if live is not None:
             return ToolResponse(tool="list_project_members", success=True, data=live)
 
-        if not self._mock.get_project(project_id):
+        uid = self._mock_user()
+        if not self._mock.get_project(project_id, user_id=uid):
             return self._error(
                 "list_project_members",
                 "PROJECT_NOT_FOUND",
                 f"Project {project_id} not found.",
             )
-        members = self._mock.list_project_members(project_id)
+        members = self._mock.list_project_members(project_id, user_id=uid)
         return ToolResponse(
             tool="list_project_members",
             success=True,
@@ -146,6 +157,7 @@ class ZohoTools:
         task = self._mock.create_task(
             project_id=project_id,
             name=name,
+            user_id=self._mock_user(),
             assignee=assignee,
             hours_estimated=hours_estimated,
         )
@@ -197,6 +209,7 @@ class ZohoTools:
 
         task = self._mock.update_task(
             task_id,
+            user_id=self._mock_user(),
             name=name,
             status=status,
             assignee=assignee,
@@ -213,11 +226,12 @@ class ZohoTools:
     async def delete_task(self, task_id: str, *, project_id: str | None = None) -> ToolResponse:
         project_id = project_id or self._resolve_project_for_task(task_id)
 
-        mock_task = self._mock.get_task(task_id)
+        uid = self._mock_user()
+        mock_task = self._mock.get_task(task_id, user_id=uid)
         if mock_task:
             if not project_id:
                 project_id = mock_task.project_id
-            if self._mock.delete_task(task_id):
+            if self._mock.delete_task(task_id, user_id=uid):
                 return ToolResponse(
                     tool="delete_task",
                     success=True,
@@ -257,8 +271,9 @@ class ZohoTools:
         project_id: str | None = None,
         view: str = "summary",
     ) -> ToolResponse:
+        uid = self._mock_user()
         if task_id:
-            task = self._mock.get_task(task_id)
+            task = self._mock.get_task(task_id, user_id=uid)
             if task is None and await self._has_live():
                 project_id = project_id or self._resolve_project_for_task(task_id)
                 if project_id:
@@ -308,14 +323,18 @@ class ZohoTools:
                 ),
             )
 
-        if project_id and not self._mock.get_project(project_id) and not await self._has_live():
+        if project_id and not self._mock.get_project(project_id, user_id=uid) and not await self._has_live():
             return self._error(
                 "get_task_utilisation",
                 "PROJECT_NOT_FOUND",
                 f"Project {project_id} not found.",
             )
 
-        summary = self._mock.build_utilisation_summary(view=view, project_id=project_id)
+        summary = self._mock.build_utilisation_summary(
+            user_id=uid,
+            view=view,
+            project_id=project_id,
+        )
         return ToolResponse(tool="get_task_utilisation", success=True, data=summary)
 
     async def _live_call(self, operation: str, *args, **kwargs):
@@ -361,7 +380,7 @@ class ZohoTools:
         return token, domain
 
     def _resolve_project_for_task(self, task_id: str) -> str | None:
-        task = self._mock.get_task(task_id)
+        task = self._mock.get_task(task_id, user_id=self._mock_user())
         return task.project_id if task else None
 
     def _error(self, tool: ToolName, code: str, message: str) -> ToolResponse:

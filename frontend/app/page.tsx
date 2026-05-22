@@ -1,5 +1,10 @@
+import { AuthGate } from "@/components/AuthGate";
 import { Chat } from "@/components/Chat";
 
 export default function Home() {
-  return <Chat />;
+  return (
+    <AuthGate>
+      <Chat />
+    </AuthGate>
+  );
 }

@@ -17,8 +17,19 @@ export function getUserId(): string {
   return id;
 }
 
+export function setUserId(id: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(USER_KEY, id);
+}
+
 export function clearAuthFlag(): void {
   sessionStorage.removeItem("zoho_auth_ok");
+}
+
+/** Remove all client-side user and auth state (call after server logout). */
+export function clearUserData(): void {
+  clearAuthFlag();
+  localStorage.removeItem(USER_KEY);
 }
 
 export function setAuthFlag(): void {

@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.memory.manager import MemoryManager
 from app.routes import create_api_router
 from app.services.assistant_service import AssistantService
+from app.services.mock_users import MockUserStore
 from app.services.token_store import TokenStore
 from app.services.zoho_auth import ZohoAuthService
 from app.tools.mock_data import MockDataStore
@@ -22,6 +23,9 @@ async def lifespan(app: FastAPI):
     token_store = TokenStore(settings)
     await token_store.initialize()
 
+    mock_user_store = MockUserStore(settings)
+    await mock_user_store.initialize()
+
     zoho_auth = ZohoAuthService(settings)
     store = MockDataStore()
     tools = create_zoho_tools(settings, token_store, zoho_auth, store)
@@ -29,6 +33,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.memory = memory
     app.state.token_store = token_store
+    app.state.mock_user_store = mock_user_store
     app.state.zoho_auth = zoho_auth
     app.state.mock_store = store
     app.state.assistant_service = AssistantService(memory=memory, tools=tools)

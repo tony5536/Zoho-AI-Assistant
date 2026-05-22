@@ -11,23 +11,26 @@ async def main() -> None:
     db = Path(tempfile.gettempdir()) / "zoho_assistant_smoke.db"
     service = await build_test_service(db)
     sid = "smoke-session"
+    uid = "mock-jamie"
 
     r1 = await service.chat(
-        ChatRequest(message="What projects do I have?", session_id=sid)
+        ChatRequest(message="What projects do I have?", session_id=sid, user_id=uid)
     )
     assert r1.status == "ok" and r1.agent == "query" and r1.routed_to == "query"
-    assert r1.data and r1.data["data"]["count"] == 3
+    assert r1.data and r1.data["data"]["count"] == 2
     print("list_projects:", r1.reply.split("\n")[0])
 
     r2 = await service.chat(
-        ChatRequest(message="Show tasks for the first one", session_id=sid)
+        ChatRequest(message="Show tasks for the first one", session_id=sid, user_id=uid)
     )
     assert r2.status == "ok" and r2.data["data"]["project_id"] == "PRJ-001"
     assert r2.project_context and r2.project_context.project_id == "PRJ-001"
     print("list_tasks (first one):", r2.project_context.project_name, r2.data["data"]["count"])
 
     r3 = await service.chat(
-        ChatRequest(message="Who has the most tasks this month?", session_id=sid)
+        ChatRequest(
+            message="Who has the most tasks this month?", session_id=sid, user_id=uid
+        )
     )
     assert r3.status == "ok" and r3.agent == "query"
     assert r3.data and r3.data["tool"] == "get_task_utilisation"
@@ -37,6 +40,7 @@ async def main() -> None:
         ChatRequest(
             message="Create a task called API Integration",
             session_id=sid,
+            user_id=uid,
         )
     )
     assert r4.agent == "action" and r4.routed_to == "action"
@@ -49,6 +53,7 @@ async def main() -> None:
         ChatRequest(
             message="confirm",
             session_id=sid,
+            user_id=uid,
             confirm=True,
             action_id=r4.pending_action.action_id,
         )
@@ -57,7 +62,7 @@ async def main() -> None:
     print("confirmed:", r5.reply)
 
     r6 = await service.chat(
-        ChatRequest(message="Delete task TSK-101", session_id=sid)
+        ChatRequest(message="Delete task TSK-101", session_id=sid, user_id=uid)
     )
     assert r6.agent == "action" and r6.status == "confirmation_required"
     assert r6.pending_action and r6.pending_action.payload["task_id"] == "TSK-101"
@@ -67,6 +72,7 @@ async def main() -> None:
         ChatRequest(
             message="confirm",
             session_id=sid,
+            user_id=uid,
             confirm=True,
             action_id=r6.pending_action.action_id,
         )

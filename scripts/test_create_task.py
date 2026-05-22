@@ -20,15 +20,21 @@ async def test_flow() -> None:
     db = Path(tempfile.gettempdir()) / "zoho_create_task_test.db"
     service = await build_test_service(db)
     sid = "create-flow"
+    uid = "mock-jamie"
 
-    await service.chat(ChatRequest(message="list projects", session_id=sid))
     await service.chat(
-        ChatRequest(message="Show tasks for the first one", session_id=sid)
+        ChatRequest(message="list projects", session_id=sid, user_id=uid)
+    )
+    await service.chat(
+        ChatRequest(
+            message="Show tasks for the first one", session_id=sid, user_id=uid
+        )
     )
     r = await service.chat(
         ChatRequest(
             message="Create a task called API Integration",
             session_id=sid,
+            user_id=uid,
         )
     )
     assert r.status == "confirmation_required", r.reply
@@ -42,6 +48,7 @@ async def test_flow() -> None:
         ChatRequest(
             message="confirm",
             session_id=sid,
+            user_id=uid,
             confirm=True,
             action_id=r.pending_action.action_id,
         )

@@ -22,3 +22,7 @@ export function resetSessionId(): string {
   localStorage.setItem(SESSION_KEY, id);
   return id;
 }
+
+export function clearSessionId(): void {
+  localStorage.removeItem(SESSION_KEY);
+}

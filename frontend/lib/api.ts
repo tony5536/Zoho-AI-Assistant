@@ -12,6 +12,42 @@ export async function fetchAuthStatus(userId: string): Promise<boolean> {
   return data.authenticated;
 }
 
+export async function logoutUser(userId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/auth/logout?user_id=${encodeURIComponent(userId)}`,
+    { method: "POST" }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Could not sign out");
+  }
+}
+
+export type MockLoginResponse = {
+  user_id: string;
+  username: string;
+  display_name: string;
+};
+
+export async function mockLogin(
+  username: string,
+  password: string
+): Promise<MockLoginResponse> {
+  const res = await fetch(`${API_BASE}/auth/mock-login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (res.status === 401) {
+    throw new Error("Invalid username or password.");
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Could not sign in");
+  }
+  return res.json() as Promise<MockLoginResponse>;
+}
+
 export async function startZohoLogin(userId: string): Promise<void> {
   const res = await fetch(
     `${API_BASE}/auth/login?user_id=${encodeURIComponent(userId)}`

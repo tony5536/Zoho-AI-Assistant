@@ -16,6 +16,43 @@ class AuthStatusResponse(BaseModel):
     user_id: str
 
 
+class LogoutResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class MockLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class MockLoginResponse(BaseModel):
+    user_id: str
+    username: str
+    display_name: str
+
+
+@router.post("/mock-login", response_model=MockLoginResponse)
+async def mock_login(request: Request, body: MockLoginRequest) -> MockLoginResponse:
+    """Demo sign-in with username/password (does not replace Zoho OAuth)."""
+    mock_users = request.app.state.mock_user_store
+    user = await mock_users.verify_credentials(body.username, body.password)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password.",
+        )
+
+    token_store = request.app.state.token_store
+    await token_store.save_tokens(
+        user_id=user["user_id"],
+        access_token="mock-demo-access",
+        refresh_token="mock-demo-refresh",
+        expires_in=86400,
+    )
+    return MockLoginResponse(**user)
+
+
 @router.get("/login", response_model=AuthUrlResponse)
 async def login(
     request: Request,
@@ -25,12 +62,13 @@ async def login(
     return await _authorization_url(request, user_id)
 
 
-@router.get("/zoho", response_model=AuthUrlResponse, include_in_schema=False)
-async def zoho_login_legacy(
+@router.get("/zoho", include_in_schema=False)
+async def zoho_login(
     request: Request,
     state: str = Query(default="default", description="User id passed as OAuth state"),
-) -> AuthUrlResponse:
-    return await _authorization_url(request, state)
+) -> RedirectResponse:
+    """Browser entry point: redirect to Zoho OAuth (or frontend when mock)."""
+    return await _redirect_to_zoho_auth(request, state)
 
 
 async def _authorization_url(request: Request, user_id: str) -> AuthUrlResponse:
@@ -42,6 +80,29 @@ async def _authorization_url(request: Request, user_id: str) -> AuthUrlResponse:
         )
     auth_service = request.app.state.zoho_auth
     return AuthUrlResponse(authorization_url=auth_service.get_authorization_url(user_id))
+
+
+async def _redirect_to_zoho_auth(request: Request, user_id: str) -> RedirectResponse:
+    settings = request.app.state.settings
+
+    if settings.zoho_use_mock:
+        token_store = request.app.state.token_store
+        await token_store.save_tokens(
+            user_id=user_id,
+            access_token="mock-access",
+            refresh_token="mock-refresh",
+            expires_in=86400,
+        )
+        params = urlencode({"user_id": user_id, "auth": "success"})
+        return RedirectResponse(url=f"{settings.frontend_url}?{params}")
+
+    if not settings.zoho_client_id:
+        params = urlencode({"auth": "error", "user_id": user_id})
+        return RedirectResponse(url=f"{settings.frontend_url}/login?{params}")
+
+    auth_service = request.app.state.zoho_auth
+    authorization_url = auth_service.get_authorization_url(user_id)
+    return RedirectResponse(url=authorization_url, status_code=302)
 
 
 @router.get("/callback")
@@ -103,14 +164,16 @@ async def auth_status(
     user_id: str = Query(..., min_length=1),
 ) -> AuthStatusResponse:
     settings = request.app.state.settings
-    if settings.zoho_use_mock:
-        return AuthStatusResponse(authenticated=True, user_id=user_id)
     token_store = request.app.state.token_store
     authenticated = await token_store.has_valid_token(user_id)
     return AuthStatusResponse(authenticated=authenticated, user_id=user_id)
 
 
-@router.post("/logout")
-async def logout(request: Request, user_id: str = Query(..., min_length=1)) -> dict:
+@router.post("/logout", response_model=LogoutResponse)
+async def logout(
+    request: Request,
+    user_id: str = Query(..., min_length=1, description="User id to sign out"),
+) -> LogoutResponse:
+    """Remove stored OAuth tokens for the user."""
     await request.app.state.token_store.delete_tokens(user_id)
-    return {"message": "Signed out."}
+    return LogoutResponse(success=True, message="Signed out.")

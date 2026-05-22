@@ -1,18 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  displayReply,
-  fetchAuthStatus,
-  sendChatMessage,
-  startZohoLogin,
-} from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { signOut } from "@/lib/auth-client";
+import { displayReply, sendChatMessage } from "@/lib/api";
 import { getSessionId, resetSessionId } from "@/lib/session";
-import {
-  getUserId,
-  hasAuthFlag,
-  setAuthFlag,
-} from "@/lib/user";
+import { getUserId } from "@/lib/user";
 import type {
   ChatMessage,
   ChatResponse,
@@ -34,12 +27,13 @@ const WELCOME =
   "Hi — I can help with your Zoho projects: list projects and tasks, review team workload, and prepare create or delete actions for your approval.\n\nTry: \"What projects do I have?\" then \"Show tasks for the first one\".";
 
 export function Chat() {
+  const router = useRouter();
   const [sessionId, setSessionId] = useState("");
   const [userId, setUserId] = useState("");
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [projectContext, setProjectContext] = useState<ProjectContext | null>(
     null
@@ -49,46 +43,11 @@ export function Chat() {
   );
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const checkAuth = useCallback(async (userId: string) => {
-    const ok = await fetchAuthStatus(userId);
-    setAuthenticated(ok);
-    if (ok) setAuthFlag();
-  }, []);
-
   useEffect(() => {
-    const sid = getSessionId();
-    const initialUserId = getUserId();
-    setSessionId(sid);
-    setUserId(initialUserId);
-
-    const params = new URLSearchParams(window.location.search);
-    const authResult = params.get("auth");
-    if (authResult === "success") {
-      setAuthFlag();
-    } else if (authResult === "error") {
-      setError(
-        "Zoho sign-in did not complete. Please connect again — do not refresh the login page."
-      );
-      setAuthenticated(false);
-    }
-    if (
-      authResult ||
-      params.has("code") ||
-      params.has("state") ||
-      params.has("accounts-server")
-    ) {
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-
-    if (hasAuthFlag()) {
-      setAuthenticated(true);
-      checkAuth(initialUserId).catch(() => setAuthenticated(false));
-    } else {
-      checkAuth(initialUserId);
-    }
-
+    setSessionId(getSessionId());
+    setUserId(getUserId());
     setMessages([{ id: uid(), role: "assistant", content: WELCOME }]);
-  }, [checkAuth]);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -190,50 +149,18 @@ export function Chat() {
     setError(null);
   };
 
-  const handleLogin = async () => {
+  const handleLogout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
     setError(null);
     try {
-      await startZohoLogin(userId);
+      await signOut();
+      router.replace("/login");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : "Could not sign out");
+      setLoggingOut(false);
     }
   };
-
-  if (authenticated === null) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-surface text-neutral-400">
-        Checking sign-in…
-      </div>
-    );
-  }
-
-  if (!authenticated) {
-    return (
-      <div className="flex h-screen flex-col items-center justify-center bg-surface px-6">
-        <div className="w-full max-w-sm border border-surface-border bg-surface-raised p-8 text-center">
-          <h1 className="text-lg font-semibold text-white">
-            Zoho Projects Assistant
-          </h1>
-          <p className="mt-3 text-sm leading-relaxed text-neutral-400">
-            Connect your Zoho account to list projects, manage tasks, and review
-            team utilisation.
-          </p>
-          <button
-            type="button"
-            onClick={handleLogin}
-            className="mt-6 w-full rounded-lg bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-neutral-200"
-          >
-            Connect Zoho
-          </button>
-          {error && (
-            <p className="mt-4 text-sm text-neutral-300" role="alert">
-              {error}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="app-shell flex h-screen flex-col">
@@ -254,13 +181,35 @@ export function Chat() {
                 <p className="text-xs text-neutral-500">Signed in</p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={handleNewSession}
-              className="shrink-0 rounded-lg border border-surface-border px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:border-neutral-500 hover:text-white"
-            >
-              New session
-            </button>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={handleNewSession}
+                disabled={loggingOut}
+                className="rounded-lg border border-surface-border px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:border-neutral-500 hover:bg-neutral-900/60 hover:text-white disabled:opacity-50"
+              >
+                New session
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                aria-label="Sign out"
+                className="flex items-center gap-1.5 rounded-lg border border-surface-border px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:border-neutral-500 hover:bg-neutral-900/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loggingOut ? (
+                  <>
+                    <span
+                      className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-600 border-t-white"
+                      aria-hidden
+                    />
+                    Signing out…
+                  </>
+                ) : (
+                  "Logout"
+                )}
+              </button>
+            </div>
           </div>
           <ProjectBadge context={projectContext} />
         </div>

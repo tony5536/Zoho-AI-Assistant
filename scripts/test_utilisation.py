@@ -21,16 +21,23 @@ async def test_queries() -> None:
     db = Path(tempfile.gettempdir()) / "zoho_util_test.db"
     service = await build_test_service(db)
     sid = "util-session"
+    uid = "mock-jamie"
 
     r1 = await service.chat(
-        ChatRequest(message="Who has the most tasks this month?", session_id=sid)
+        ChatRequest(
+            message="Who has the most tasks this month?", session_id=sid, user_id=uid
+        )
     )
     assert r1.status == "ok" and "most" in r1.reply.lower()
     assert r1.data and r1.data["tool"] == "get_task_utilisation"
     print("most_tasks:", r1.reply.split("\n")[0])
 
     r2 = await service.chat(
-        ChatRequest(message="Which employee has the highest workload?", session_id=sid)
+        ChatRequest(
+            message="Which employee has the highest workload?",
+            session_id=sid,
+            user_id=uid,
+        )
     )
     assert r2.status == "ok" and "workload" in r2.reply.lower()
     print("workload:", r2.reply.split("\n")[0])
@@ -42,7 +49,7 @@ async def test_queries() -> None:
     print("distribution:", r3.reply.split("\n")[0])
 
     r4 = await service.chat(
-        ChatRequest(message="Show task utilisation", session_id=sid)
+        ChatRequest(message="Show task utilisation", session_id=sid, user_id=uid)
     )
     assert r4.status == "ok" and "utilisation" in r4.reply.lower()
     print("summary:", r4.reply.split("\n")[0])
