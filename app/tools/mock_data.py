@@ -134,6 +134,39 @@ _INITIAL_TASKS: list[dict] = [
     },
 ]
 
+_UTILISATION_EXCLUDED_STATUSES = frozenset({
+    "completed",
+    "done",
+    "closed",
+    "archived",
+    "cancelled",
+    "deleted",
+})
+
+_shared_store: "MockDataStore | None" = None
+
+
+def _normalize_task_status(status: str | None) -> str:
+    if not status:
+        return ""
+    return status.lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def is_active_for_utilisation(task: dict) -> bool:
+    """Tasks excluded from utilisation analytics (deleted tasks are removed from the store)."""
+    return _normalize_task_status(task.get("status")) not in _UTILISATION_EXCLUDED_STATUSES
+
+
+def get_shared_mock_store(*, reset: bool = False) -> "MockDataStore":
+    """Single in-memory store for mock mode so analytics stay consistent across tool instances."""
+    global _shared_store
+    if _shared_store is None:
+        _shared_store = MockDataStore()
+    elif reset:
+        _shared_store.reset()
+    return _shared_store
+
+
 _PROJECT_MEMBERS: dict[str, list[dict]] = {
     "PRJ-001": [
         {"user_id": "USR-1", "name": "Alex Morgan", "email": "alex@example.com", "role": "Designer"},
@@ -156,6 +189,10 @@ class MockDataStore:
     """In-memory Zoho Projects data scoped per mock user."""
 
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Restore seed projects/tasks for deterministic demos and tests."""
         self._projects = deepcopy(_INITIAL_PROJECTS)
         self._tasks = deepcopy(_INITIAL_TASKS)
         self._task_counter = 500
@@ -322,12 +359,15 @@ class MockDataStore:
             return TaskSummary(**{k: v for k, v in task.items() if k in TaskSummary.model_fields})
         return None
 
-    def delete_task(self, task_id: str, user_id: str | None = None) -> bool:
-        if not self.get_task(task_id, user_id=user_id):
-            return False
+    def _purge_task(self, task_id: str) -> bool:
         before = len(self._tasks)
         self._tasks = [t for t in self._tasks if t["task_id"] != task_id]
         return len(self._tasks) < before
+
+    def delete_task(self, task_id: str, user_id: str | None = None) -> bool:
+        if not self.get_task(task_id, user_id=user_id):
+            return False
+        return self._purge_task(task_id)
 
     def list_all_tasks(
         self, project_id: str | None = None, user_id: str | None = None
@@ -351,21 +391,32 @@ class MockDataStore:
         return None
 
     def get_task_org(self, task_id: str) -> TaskSummary | None:
-        """Resolve any organisation task (utilisation / reporting only)."""
+        """Resolve any active organisation task (utilisation / reporting only)."""
         for task in self._tasks:
-            if task["task_id"] == task_id:
-                return TaskSummary(**task)
+            if task["task_id"] == task_id and is_active_for_utilisation(task):
+                return TaskSummary(
+                    **{k: v for k, v in task.items() if k in TaskSummary.model_fields}
+                )
         return None
+
+    def list_tasks_for_utilisation(
+        self, project_id: str | None = None
+    ) -> list[TaskSummary]:
+        """Active organisation tasks included in utilisation analytics."""
+        tasks = [
+            task
+            for task in self._tasks
+            if is_active_for_utilisation(task)
+            and (project_id is None or task["project_id"] == project_id)
+        ]
+        return [
+            TaskSummary(**{k: v for k, v in task.items() if k in TaskSummary.model_fields})
+            for task in tasks
+        ]
 
     def list_all_tasks_org(self, project_id: str | None = None) -> list[TaskSummary]:
         """All tasks across the mock organisation (not scoped to one user)."""
-        if project_id:
-            return [
-                TaskSummary(**task)
-                for task in self._tasks
-                if task["project_id"] == project_id
-            ]
-        return [TaskSummary(**task) for task in self._tasks]
+        return self.list_tasks_for_utilisation(project_id)
 
     def build_utilisation_summary(
         self,
@@ -389,7 +440,7 @@ class MockDataStore:
                 tasks=[],
             )
 
-        tasks = self.list_all_tasks_org(project_id)
+        tasks = self.list_tasks_for_utilisation(project_id)
         project_name = None
         if project_id:
             project = self.get_project_org(project_id)

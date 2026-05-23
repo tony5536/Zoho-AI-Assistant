@@ -13,7 +13,7 @@ from app.services.assistant_service import AssistantService
 from app.services.mock_users import MockUserStore
 from app.services.token_store import TokenStore
 from app.services.zoho_auth import ZohoAuthService
-from app.tools.mock_data import MockDataStore
+from app.tools.mock_data import MockDataStore, get_shared_mock_store
 from app.tools.zoho_tools import create_zoho_tools
 from app.utils.config import get_settings
 
@@ -50,7 +50,10 @@ class OriginLoggingMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     settings = get_settings()
 
-    store = MockDataStore()
+    if settings.zoho_use_mock:
+        store = get_shared_mock_store(reset=True)
+    else:
+        store = MockDataStore()
 
     memory = MemoryManager(
         settings.memory_db_path,

@@ -13,13 +13,29 @@ def test_intent_routes_to_query_agent() -> None:
         "Show details for TSK-101",
         "Open task TSK-101",
         "Task details TSK-101",
+        "show task TSK-101",
+        "details for TSK-101",
+        "inspect task TSK-101",
+        "details for task TSK-101",
     ):
         assert is_get_task_details_message(msg), msg
         intent = parse_intent(msg)
-        assert intent.operation == "get_task_details"
+        assert intent.operation == "get_task_details", msg
         assert intent.params["task_id"] == "TSK-101"
         route = SupervisorAgent()._classify(msg.lower(), {})
         assert route == "query"
+
+
+def test_list_tasks_not_misrouted_to_get_task_details() -> None:
+    for msg in (
+        "show tasks for PRJ-001",
+        "list tasks",
+        "tasks from project two",
+        "show tasks",
+        "tasks for project one",
+    ):
+        intent = parse_intent(msg)
+        assert intent.operation == "list_tasks", msg
 
 
 @pytest.mark.asyncio

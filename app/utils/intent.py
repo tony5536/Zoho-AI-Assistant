@@ -10,6 +10,7 @@ from app.utils.task_intent import (
     is_delete_task_message,
     is_get_task_details_message,
     is_list_project_members_message,
+    is_list_tasks_message,
     is_update_task_message,
     parse_update_task_params,
 )
@@ -60,7 +61,16 @@ def parse_intent(message: str) -> ParsedIntent:
     ):
         return ParsedIntent(operation="list_projects")
 
-    if _matches(lower, ("list tasks", "show tasks", "tasks in", "tasks for", "tasks from")):
+    if is_get_task_details_message(text):
+        return ParsedIntent(
+            operation="get_task_details",
+            params={
+                "task_id": _extract_id(text, r"\b(TSK-\d+)\b"),
+                **_project_params(text, _extract_id(text, r"\b(PRJ-\d+)\b")),
+            },
+        )
+
+    if is_list_tasks_message(text):
         project_id = _extract_id(text, r"\b(PRJ-\d+)\b")
         return ParsedIntent(
             operation="list_tasks",
@@ -80,15 +90,6 @@ def parse_intent(message: str) -> ParsedIntent:
                 "status": _extract_status(lower),
                 "assignee": _extract_assignee(text),
                 "due_date": _extract_due_date(lower),
-            },
-        )
-
-    if is_get_task_details_message(text):
-        return ParsedIntent(
-            operation="get_task_details",
-            params={
-                "task_id": _extract_id(text, r"\b(TSK-\d+)\b"),
-                **_project_params(text, _extract_id(text, r"\b(PRJ-\d+)\b")),
             },
         )
 

@@ -20,7 +20,7 @@ from app.models.tool_models import (
 from app.services.token_store import TokenStore
 from app.services.zoho_auth import ZohoAuthService
 from app.services.zoho_client import ZohoClient
-from app.tools.mock_data import MockDataStore
+from app.tools.mock_data import MockDataStore, get_shared_mock_store
 from app.utils.config import Settings
 
 _current_user: ContextVar[str | None] = ContextVar("_current_user", default=None)
@@ -49,7 +49,12 @@ class ZohoTools:
         self._token_store = token_store
         self._auth = auth_service
         self._client = client
-        self._mock = MockDataStore() if store is None else store
+        if store is not None:
+            self._mock = store
+        elif settings.zoho_use_mock:
+            self._mock = get_shared_mock_store()
+        else:
+            self._mock = MockDataStore()
 
     def get_task(self, task_id: str):
         ref = task_id.upper() if _DISPLAY_TASK_KEY.match(task_id.strip()) else task_id

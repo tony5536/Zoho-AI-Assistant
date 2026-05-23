@@ -270,10 +270,24 @@ def parse_update_task_params(message: str) -> dict[str, Any]:
     return params
 
 
+_GET_TASK_DETAILS_PATTERNS = [
+    re.compile(r"\b(?:open|show|view|inspect|get)\s+task\b", re.IGNORECASE),
+    re.compile(r"\btask\s+details\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:show|get)\s+details\s+(?:for|of|on)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bdetails\s+(?:for|of|on)\s+(?:task\s+)?", re.IGNORECASE),
+    re.compile(r"\bdetails\s+for\s+task\b", re.IGNORECASE),
+]
+
+
 def is_get_task_details_message(message: str) -> bool:
     """True when the user wants full details for a specific task."""
     if not _TSK_PATTERN.search(message):
         return False
+    if any(p.search(message) for p in _GET_TASK_DETAILS_PATTERNS):
+        return True
     lower = message.lower()
     return any(
         phrase in lower
@@ -290,6 +304,22 @@ def is_get_task_details_message(message: str) -> bool:
             "details on task",
         )
     )
+
+
+_LIST_TASKS_PATTERNS = [
+    re.compile(r"\blist\s+tasks\b", re.IGNORECASE),
+    re.compile(r"\bshow\s+tasks\b", re.IGNORECASE),
+    re.compile(r"\btasks\s+in\b", re.IGNORECASE),
+    re.compile(r"\btasks\s+for\b", re.IGNORECASE),
+    re.compile(r"\btasks\s+from\b", re.IGNORECASE),
+]
+
+
+def is_list_tasks_message(message: str) -> bool:
+    """True when the user wants a task list (not a single-task detail view)."""
+    if is_get_task_details_message(message):
+        return False
+    return any(p.search(message) for p in _LIST_TASKS_PATTERNS)
 
 
 def is_list_project_members_message(message: str) -> bool:

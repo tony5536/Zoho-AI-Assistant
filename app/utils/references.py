@@ -126,15 +126,26 @@ def _implies_current_project(message: str) -> bool:
 
 def is_contextual_task_filter(lower: str) -> bool:
     """Follow-up filters (e.g. overdue only) that keep the active project."""
+    if re.search(r"\bTSK-\d+\b", lower):
+        return False
     if "project" in lower and any(
         cue in lower for cue in ("list projects", "show projects", "my projects", "which projects")
     ):
         return False
     has_filter = any(
         token in lower
-        for token in ("overdue", "open", "in progress", "completed", "on hold", "only")
-    )
+        for token in ("overdue", "in progress", "completed", "on hold", "only")
+    ) or _has_open_status_filter(lower)
     has_task_cue = any(
         token in lower for token in ("task", "ones", "those", "them")
     )
     return has_filter and (has_task_cue or "only" in lower)
+
+
+def _has_open_status_filter(lower: str) -> bool:
+    """'open' as status filter, not phrasing like 'open task TSK-101'."""
+    if "open" not in lower:
+        return False
+    if re.search(r"\bopen\s+task\b", lower):
+        return False
+    return True
