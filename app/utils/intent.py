@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.utils.references import extract_project_ref, is_contextual_task_filter
+from app.utils.task_references import extract_task_reference
 from app.utils.task_intent import (
     extract_delete_task_id,
     extract_task_name,
@@ -82,17 +83,6 @@ def parse_intent(message: str) -> ParsedIntent:
             },
         )
 
-    if is_contextual_task_filter(lower):
-        return ParsedIntent(
-            operation="list_tasks",
-            params={
-                **_project_params(text, _extract_id(text, r"\b(PRJ-\d+)\b")),
-                "status": _extract_status(lower),
-                "assignee": _extract_assignee(text),
-                "due_date": _extract_due_date(lower),
-            },
-        )
-
     if is_list_project_members_message(text):
         project_id = _extract_id(text, r"\b(PRJ-\d+)\b")
         return ParsedIntent(
@@ -154,9 +144,20 @@ def parse_intent(message: str) -> ParsedIntent:
         )
 
     if is_delete_task_message(text):
+        delete_params: dict = {"task_id": extract_delete_task_id(text)}
+        if extract_task_reference(text):
+            delete_params["task_ref"] = "contextual"
+        return ParsedIntent(operation="delete_task", params=delete_params)
+
+    if is_contextual_task_filter(lower):
         return ParsedIntent(
-            operation="delete_task",
-            params={"task_id": extract_delete_task_id(text)},
+            operation="list_tasks",
+            params={
+                **_project_params(text, _extract_id(text, r"\b(PRJ-\d+)\b")),
+                "status": _extract_status(lower),
+                "assignee": _extract_assignee(text),
+                "due_date": _extract_due_date(lower),
+            },
         )
 
     return ParsedIntent(operation="unknown")

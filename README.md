@@ -14,8 +14,8 @@ A multi-agent assistant for **Zoho Projects** with OAuth sign-in, eight API tool
 | **Agents** | Supervisor routes to read-only **QueryAgent** or write **ActionAgent** |
 | **Tools (8)** | List/browse projects, tasks, members, utilisation; create/update/delete tasks (writes need approval) |
 | **HITL** | Create/update/delete tasks return `confirmation_required`; UI shows Confirm / Cancel |
-| **Memory** | Short-term: session chat, active project, pending actions. Long-term (`user_memory`): last active project, recent messages, frequent project — restored on login and chat |
-| **Modes** | Live Zoho API or `ZOHO_USE_MOCK=true` for offline demos |
+| **Memory** | Short-term: session chat, active project, **last task** (for “that task”, “current task”, “assign it”), pending actions. Long-term (`user_memory`): last active project, recent messages, frequent project — restored on login and chat |
+| **Modes** | **Primary:** real Zoho OAuth and live API. **`ZOHO_USE_MOCK=true`** is for local development/demos only (no OAuth) |
 
 ---
 
@@ -47,7 +47,9 @@ A multi-agent assistant for **Zoho Projects** with OAuth sign-in, eight API tool
                      └─► 401 retry after refresh (live only)
 ```
 
-**Routing:** The supervisor uses keyword/regex cues (`update`, `assign`, `create`, … → ActionAgent; everything else → QueryAgent). Intent parsing in `app/utils/intent.py` and `task_intent.py` maps natural language to tool operations without an LLM.
+**Routing:** The supervisor uses keyword/regex cues (action verb **and** task/object cue → ActionAgent; reads and utilisation → QueryAgent). Intent parsing in `app/utils/intent.py` and `task_intent.py` maps natural language to tool operations without an LLM.
+
+**Task follow-ups:** After you open or update a task, you can say e.g. “update **that task** status to completed”, “delete **this task**”, “**assign it** to Alex”, or “**current task**” — the session remembers the last task id (see `app/utils/task_references.py`).
 
 **HITL:** ActionAgent stages `pending_action` in SQLite; the client sends `confirm: true` and `action_id` to execute. Cancel dismisses without calling Zoho.
 
@@ -112,7 +114,9 @@ npm run dev
 
 Open http://localhost:3000, click **Connect Zoho**, then chat.
 
-### 3. Mock mode (no Zoho account)
+### 3. Mock mode (development only)
+
+For day-to-day evaluation, use **Connect Zoho** and the live API (steps 1–2 above). Mock mode is optional for offline work:
 
 In `.env`:
 
@@ -120,7 +124,7 @@ In `.env`:
 ZOHO_USE_MOCK=true
 ```
 
-Restart the backend. The UI skips OAuth; chat uses in-memory mock project/task data (`PRJ-001`, `TSK-101`, etc.).
+Restart the backend. The UI skips OAuth; chat uses in-memory mock project/task data (`PRJ-001`, `TSK-101`, etc.). Do not use mock mode for production or primary QA against real Zoho data.
 
 ---
 

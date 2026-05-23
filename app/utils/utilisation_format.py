@@ -90,9 +90,35 @@ def _format_distribution(summary: UtilisationSummary, scope: str, period: str) -
     return "\n".join(lines)
 
 
+def _append_fallback_note(text: str, summary: UtilisationSummary) -> str:
+    if not summary.fallback_note:
+        return text
+    return f"{text}\n\nNote: {summary.fallback_note}"
+
+
+def _format_status_breakdown(summary: UtilisationSummary) -> list[str]:
+    lines: list[str] = []
+    if summary.active_task_count is not None:
+        lines.append(f"Active tasks (in utilisation): {summary.active_task_count}")
+    if summary.completed_task_count is not None and summary.completed_task_count > 0:
+        lines.append(
+            f"Completed/archived (excluded from active counts): {summary.completed_task_count}"
+        )
+    if summary.overdue_task_count is not None and summary.overdue_task_count > 0:
+        lines.append(f"Overdue active tasks: {summary.overdue_task_count}")
+    if summary.status_groups:
+        grouped = ", ".join(f"{k}: {v}" for k, v in sorted(summary.status_groups.items()))
+        lines.append(f"By status: {grouped}")
+    return lines
+
+
 def _format_overview(summary: UtilisationSummary, scope: str, period: str) -> str:
     if not summary.by_assignee:
-        return f"No utilisation data {scope} for {period}."
+        base = f"No utilisation data {scope} for {period}."
+        extra = _format_status_breakdown(summary)
+        if extra:
+            base = base + "\n" + "\n".join(extra)
+        return _append_fallback_note(base, summary)
     overall = 0.0
     if summary.total_hours_estimated > 0:
         overall = round(
@@ -110,6 +136,7 @@ def _format_overview(summary: UtilisationSummary, scope: str, period: str) -> st
             f"Highest workload: {summary.top_by_workload}. "
             f"Most tasks assigned: {summary.top_by_tasks}."
         )
+    breakdown = _format_status_breakdown(summary)
     lines.extend(
         [
             "",
@@ -117,7 +144,9 @@ def _format_overview(summary: UtilisationSummary, scope: str, period: str) -> st
             *_assignee_lines(summary.by_assignee, key="full"),
         ]
     )
-    return "\n".join(lines)
+    if breakdown:
+        lines.extend(["", *breakdown])
+    return _append_fallback_note("\n".join(lines), summary)
 
 
 def _assignee_lines(

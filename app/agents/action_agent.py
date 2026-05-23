@@ -8,6 +8,11 @@ from app.tools.zoho_tools import ZohoTools
 from app.utils.intent import parse_intent
 from app.utils.references import resolve_project_id
 from app.utils.task_intent import is_confirmation_message
+from app.utils.task_references import (
+    extract_task_reference,
+    missing_task_context_message,
+    resolve_task_reference,
+)
 
 WRITE_TOOLS = frozenset({"create_task", "update_task", "delete_task"})
 
@@ -40,8 +45,13 @@ class ActionAgent(BaseAgent):
                 'For example: "Create a task called API Integration".'
             )
 
+        task_context = await self._memory.get_task_context(session_id)
         return await self._stage_confirmation(
-            session_id, state["user_message"], intent, context
+            session_id,
+            state["user_message"],
+            intent,
+            context,
+            task_context=task_context,
         )
 
     async def _stage_confirmation(
@@ -50,6 +60,8 @@ class ActionAgent(BaseAgent):
         message: str,
         intent,
         context: ProjectContext | None,
+        *,
+        task_context=None,
     ) -> dict[str, Any]:
         tool = intent.operation
         recent = await self._memory.get_recent_projects(session_id)
@@ -60,11 +72,18 @@ class ActionAgent(BaseAgent):
             recent_projects=recent,
             project_context=context,
         )
+        resolved_task_id = resolve_task_reference(
+            message,
+            explicit_id=intent.params.get("task_id"),
+            task_context=task_context,
+        )
         payload, summary, error = self._build_payload(
             tool,
             intent.params,
             context,
             resolved_project_id=resolved_project_id,
+            resolved_task_id=resolved_task_id,
+            message=message,
         )
         if error:
             return self._error(error)
@@ -108,11 +127,16 @@ class ActionAgent(BaseAgent):
         await self._memory.resolve_pending_action(action_id)
         updated_context = context
         if pending.tool == "create_task" and result.data and result.data.task:
+            task = result.data.task
             updated_context = await self._memory.set_project_context(
                 session_id,
-                result.data.task.project_id,
-                await self._project_display_name(result.data.task.project_id, context),
+                task.project_id,
+                await self._project_display_name(task.project_id, context),
             )
+            await self._memory.set_task_context(session_id, task.task_id, task.name)
+        if pending.tool == "update_task" and result.data and result.data.task:
+            task = result.data.task
+            await self._memory.set_task_context(session_id, task.task_id, task.name)
 
         return {
             "reply": self._format_success(pending, result, updated_context),
@@ -168,6 +192,8 @@ class ActionAgent(BaseAgent):
         context: ProjectContext | None,
         *,
         resolved_project_id: str | None = None,
+        resolved_task_id: str | None = None,
+        message: str = "",
     ) -> tuple[dict, str, str | None]:
         if tool == "create_task":
             project_id = (
@@ -201,8 +227,12 @@ class ActionAgent(BaseAgent):
             return payload, summary, None
 
         if tool == "update_task":
-            task_id = params.get("task_id")
+            task_id = resolved_task_id or params.get("task_id")
             if not task_id:
+                if params.get("task_ref") == "contextual" or (
+                    message and not params.get("task_id")
+                ):
+                    return {}, "", missing_task_context_message()
                 return {}, "", "Which task should I update? Include the task id (e.g. TSK-101)."
             skip = {"task_id", "project_id", "project_ref"}
             updates = {
@@ -227,8 +257,10 @@ class ActionAgent(BaseAgent):
             return payload, summary, None
 
         if tool == "delete_task":
-            task_id = params.get("task_id")
+            task_id = resolved_task_id or params.get("task_id")
             if not task_id:
+                if params.get("task_ref") == "contextual" or extract_task_reference(message):
+                    return {}, "", missing_task_context_message()
                 return (
                     {},
                     "",

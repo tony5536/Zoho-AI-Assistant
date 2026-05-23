@@ -3,6 +3,8 @@
 import re
 from typing import Any
 
+from app.utils.task_references import extract_task_reference
+
 _CREATE_TASK_RE = re.compile(r"\b(create|add|new)\s+(?:a\s+)?task\b", re.IGNORECASE)
 
 _TASK_NAME_PATTERNS = [
@@ -34,6 +36,27 @@ _DELETE_TASK_PATTERNS = [
     re.compile(r"\b(delete|remove)\s+(TSK-\d+)\b", re.IGNORECASE),
 ]
 
+_CONTEXTUAL_DELETE_RE = re.compile(
+    r"\b(delete|remove)\s+(?:this|that|the|current)\s+task\b",
+    re.IGNORECASE,
+)
+
+_CONTEXTUAL_UPDATE_RE = re.compile(
+    r"\b(update|change|modify|mark|set)\s+(?:this|that|the|current)\s+task\b",
+    re.IGNORECASE,
+)
+
+_ASSIGN_IT_RE = re.compile(
+    r"\bassign\s+it\s+to\s+(.+?)(?:\s*$|\.)",
+    re.IGNORECASE,
+)
+
+_UPDATE_THAT_STATUS_RE = re.compile(
+    r"\b(?:update|change|set|mark)\s+(?:that|this|the|current)\s+task\s+"
+    r"(?:status\s+)?(?:to|as)\s+(\w+(?:\s+\w+)?)",
+    re.IGNORECASE,
+)
+
 _CONFIRM_PHRASES = frozenset(
     {"yes", "confirm", "confirmed", "approve", "approved", "proceed", "ok", "okay"}
 )
@@ -44,6 +67,8 @@ def is_create_task_message(message: str) -> bool:
 
 
 def is_delete_task_message(message: str) -> bool:
+    if _CONTEXTUAL_DELETE_RE.search(message):
+        return True
     if any(p.search(message) for p in _DELETE_TASK_PATTERNS):
         return True
     if re.search(r"\b(delete|remove)\b", message, re.IGNORECASE) and _TSK_PATTERN.search(
@@ -58,6 +83,8 @@ def is_confirmation_message(message: str) -> bool:
 
 
 def extract_delete_task_id(message: str) -> str | None:
+    if _CONTEXTUAL_DELETE_RE.search(message) or extract_task_reference(message):
+        return None
     for pattern in _DELETE_TASK_PATTERNS:
         match = pattern.search(message)
         if match:
@@ -165,6 +192,14 @@ _STATUS_ALIASES: dict[str, str] = {
 
 def is_update_task_message(message: str) -> bool:
     """True when the message requests a task field change (not create/delete)."""
+    if is_delete_task_message(message):
+        return False
+    if extract_task_reference(message) or _CONTEXTUAL_UPDATE_RE.search(message):
+        return True
+    if _ASSIGN_IT_RE.search(message):
+        return True
+    if re.search(r"\bmark\s+(?:the\s+)?task\b", message, re.IGNORECASE):
+        return True
     if not _TSK_PATTERN.search(message):
         return False
     lower = message.lower()
@@ -208,6 +243,20 @@ def is_update_task_message(message: str) -> bool:
 def parse_update_task_params(message: str) -> dict[str, Any]:
     """Extract task_id and fields to update from conversational phrasing."""
     params: dict[str, Any] = {}
+    if extract_task_reference(message):
+        params["task_ref"] = "contextual"
+
+    contextual = _UPDATE_THAT_STATUS_RE.search(message)
+    if contextual:
+        params["task_ref"] = "contextual"
+        raw_status = contextual.group(1).strip().lower()
+        params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
+
+    assign_it = _ASSIGN_IT_RE.search(message)
+    if assign_it:
+        params["task_ref"] = "contextual"
+        params["assignee"] = assign_it.group(1).strip().rstrip(".,!? ")
+
     task_match = _TSK_PATTERN.search(message)
     if task_match:
         params["task_id"] = task_match.group(1).upper()
@@ -249,6 +298,16 @@ def parse_update_task_params(message: str) -> dict[str, Any]:
     if set_priority:
         params["task_id"] = set_priority.group(1).upper()
         params["priority"] = set_priority.group(2).strip().lower()
+
+    mark_task = re.search(
+        r"\bmark\s+(?:the\s+)?task\s+(?:as\s+)?(\w+(?:\s+\w+)?)",
+        message,
+        re.IGNORECASE,
+    )
+    if mark_task:
+        params["task_ref"] = "contextual"
+        raw_status = mark_task.group(1).strip().lower()
+        params["status"] = _STATUS_ALIASES.get(raw_status, raw_status.replace(" ", "_"))
 
     if _UPDATE_TASK_RE.search(message):
         quoted = _extract_quoted(message)

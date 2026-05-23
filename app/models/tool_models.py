@@ -91,6 +91,11 @@ class UtilisationSummary(BaseModel):
     top_by_tasks: str | None = None
     top_by_workload: str | None = None
     tasks: list[TaskUtilisationRow]
+    active_task_count: int | None = None
+    completed_task_count: int | None = None
+    overdue_task_count: int | None = None
+    status_groups: dict[str, int] | None = None
+    fallback_note: str | None = None
 
 
 class ListProjectsResult(BaseModel):
@@ -153,6 +158,11 @@ class ToolResponse(BaseModel):
 class ProjectContext(BaseModel):
     project_id: str
     project_name: str
+
+
+class TaskContext(BaseModel):
+    task_id: str
+    task_name: str
 
 
 class RecentProject(BaseModel):

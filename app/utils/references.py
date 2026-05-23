@@ -128,6 +128,11 @@ def is_contextual_task_filter(lower: str) -> bool:
     """Follow-up filters (e.g. overdue only) that keep the active project."""
     if re.search(r"\bTSK-\d+\b", lower):
         return False
+    if re.search(
+        r"\b(update|change|modify|delete|remove|create|add|assign|mark)\b",
+        lower,
+    ):
+        return False
     if "project" in lower and any(
         cue in lower for cue in ("list projects", "show projects", "my projects", "which projects")
     ):

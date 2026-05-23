@@ -12,11 +12,14 @@ from app.models.tool_models import (
     ListTasksResult,
     TaskDetails,
     TaskMutationResult,
+    TaskSummary,
     TaskUtilisation,
+    UtilisationSummary,
     ToolError,
     ToolName,
     ToolResponse,
 )
+from app.utils.utilisation_aggregate import build_utilisation_from_tasks
 from app.services.token_store import TokenStore
 from app.services.zoho_auth import ZohoAuthService
 from app.services.zoho_client import ZohoClient
@@ -357,11 +360,104 @@ class ZohoTools:
                 f"Project {project_id} not found.",
             )
 
+        if await self._has_live():
+            live_summary = await self._build_live_utilisation_summary(
+                view=view,
+                project_id=project_id,
+            )
+            if live_summary is not None:
+                return ToolResponse(
+                    tool="get_task_utilisation",
+                    success=True,
+                    data=live_summary,
+                )
+
         summary = self._mock.build_utilisation_summary(
             view=view,
             project_id=project_id,
         )
         return ToolResponse(tool="get_task_utilisation", success=True, data=summary)
+
+    async def _build_live_utilisation_summary(
+        self,
+        *,
+        view: str,
+        project_id: str | None,
+    ) -> UtilisationSummary | None:
+        """Aggregate utilisation from live task lists when OAuth is active."""
+        notes: list[str] = []
+        collected: list[TaskSummary] = []
+        project_name: str | None = None
+
+        if project_id:
+            live_tasks = await self._live_call("list_tasks", project_id)
+            if live_tasks is None:
+                return build_utilisation_from_tasks(
+                    [],
+                    view=view,
+                    project_id=project_id,
+                    fallback_note=(
+                        "Live Zoho API did not return tasks for this project. "
+                        "Showing counts only (no fabricated hours)."
+                    ),
+                )
+            collected.extend(live_tasks.tasks)
+            live_projects = await self._live_call("list_projects")
+            if live_projects:
+                match = next(
+                    (p for p in live_projects.projects if p.project_id == project_id),
+                    None,
+                )
+                project_name = match.name if match else project_id
+            else:
+                mock_project = self._mock.get_project_org(project_id)
+                project_name = mock_project.name if mock_project else project_id
+        else:
+            live_projects = await self._live_call("list_projects")
+            if live_projects is None:
+                return build_utilisation_from_tasks(
+                    [],
+                    view=view,
+                    fallback_note=(
+                        "Live Zoho API did not return project data. "
+                        "Connect Zoho or retry later."
+                    ),
+                )
+            for project in live_projects.projects:
+                live_tasks = await self._live_call("list_tasks", project.project_id)
+                if live_tasks is None:
+                    notes.append(f"Skipped tasks for {project.project_id} (API unavailable).")
+                    continue
+                collected.extend(live_tasks.tasks)
+
+        if not collected:
+            note = (
+                "Live Zoho API returned no tasks for utilisation. "
+                "No hours were estimated from mock data."
+            )
+            if notes:
+                note = f"{note} {' '.join(notes)}"
+            return build_utilisation_from_tasks(
+                [],
+                view=view,
+                project_id=project_id,
+                project_name=project_name,
+                fallback_note=note,
+            )
+
+        fallback_note = " ".join(notes) if notes else None
+        if fallback_note:
+            fallback_note = (
+                f"Partial live analytics: {fallback_note} "
+                "Figures below use only tasks returned by Zoho."
+            )
+        return build_utilisation_from_tasks(
+            collected,
+            view=view,
+            project_id=project_id,
+            project_name=project_name,
+            fallback_note=fallback_note,
+        )
 
     async def _live_call(self, operation: str, *args, **kwargs):
         if self._settings.zoho_use_mock or not await self._has_live():

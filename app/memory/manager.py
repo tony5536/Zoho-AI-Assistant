@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from app.models.tool_models import PendingAction, ProjectContext, RecentProject
+from app.models.tool_models import PendingAction, ProjectContext, RecentProject, TaskContext
 from app.utils.sqlite import configure_connection
 from app.models.user_memory import StoredMessage, UserMemorySnapshot
 
@@ -53,6 +53,16 @@ class MemoryManager:
                     session_id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL,
                     project_name TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_task_context (
+                    session_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    task_name TEXT NOT NULL,
                     updated_at TEXT DEFAULT (datetime('now'))
                 )
                 """
@@ -389,6 +399,43 @@ class MemoryManager:
             )
             await db.commit()
         return ProjectContext(project_id=project_id, project_name=project_name)
+
+    async def get_task_context(self, session_id: str) -> TaskContext | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT task_id, task_name
+                FROM session_task_context
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return TaskContext(task_id=row["task_id"], task_name=row["task_name"])
+
+    async def set_task_context(
+        self,
+        session_id: str,
+        task_id: str,
+        task_name: str,
+    ) -> TaskContext:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO session_task_context (session_id, task_id, task_name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    task_name = excluded.task_name,
+                    updated_at = datetime('now')
+                """,
+                (session_id, task_id, task_name),
+            )
+            await db.commit()
+        return TaskContext(task_id=task_id, task_name=task_name)
 
     async def set_recent_projects(
         self,

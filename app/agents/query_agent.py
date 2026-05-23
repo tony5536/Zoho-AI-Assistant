@@ -7,6 +7,7 @@ from app.models.tool_models import ProjectContext, RecentProject, ToolResponse
 from app.tools.zoho_tools import ZohoTools
 from app.utils.intent import ParsedIntent, parse_intent
 from app.utils.references import resolve_project_id
+from app.utils.task_references import resolve_task_reference
 from app.utils.task_format import format_task_block, format_task_list
 from app.utils.utilisation_format import format_utilisation_reply
 
@@ -27,6 +28,7 @@ class QueryAgent(BaseAgent):
         context = state.get("project_context") or await self._memory.get_project_context(
             session_id
         )
+        task_context = await self._memory.get_task_context(session_id)
 
         if intent.operation == "set_project_context":
             return await self._set_project_context(session_id, message, intent, context)
@@ -41,18 +43,21 @@ class QueryAgent(BaseAgent):
             if not project_id:
                 return self._error(self._unresolved_project_hint())
             context = await self._sync_project_context(session_id, project_id)
-            return await self._respond_tool(
-                await self._tools.list_tasks(
-                    project_id,
-                    status=intent.params.get("status"),
-                    assignee=intent.params.get("assignee"),
-                    due_date=intent.params.get("due_date"),
-                ),
-                context,
+            result = await self._tools.list_tasks(
+                project_id,
+                status=intent.params.get("status"),
+                assignee=intent.params.get("assignee"),
+                due_date=intent.params.get("due_date"),
             )
+            await self._maybe_remember_single_task(session_id, result)
+            return await self._respond_tool(result, context)
 
         if intent.operation == "get_task_details":
-            task_id = intent.params.get("task_id")
+            task_id = resolve_task_reference(
+                message,
+                explicit_id=intent.params.get("task_id"),
+                task_context=task_context,
+            )
             if not task_id:
                 return self._error(
                     'Include a task id, e.g. "task details for TSK-101" or "open task TSK-101".'
@@ -66,10 +71,12 @@ class QueryAgent(BaseAgent):
                     "I couldn't find that task. Check the task id or set project context first."
                 )
             context = await self._sync_project_context(session_id, project_id)
-            return await self._respond_tool(
-                await self._tools.get_task_details(project_id, task_id),
-                context,
-            )
+            result = await self._tools.get_task_details(project_id, task_id)
+            if result.success and result.data:
+                await self._memory.set_task_context(
+                    session_id, result.data.task_id, result.data.name
+                )
+            return await self._respond_tool(result, context)
 
         if intent.operation == "list_project_members":
             project_id = await self._resolve_project_id(session_id, message, intent, context)
@@ -182,6 +189,18 @@ class QueryAgent(BaseAgent):
             recent_projects=recent,
             project_context=context,
         )
+
+    async def _maybe_remember_single_task(
+        self, session_id: str, result: ToolResponse
+    ) -> None:
+        if not result.success or result.data is None:
+            return
+        if result.tool != "list_tasks":
+            return
+        tasks = result.data.tasks
+        if len(tasks) == 1:
+            task = tasks[0]
+            await self._memory.set_task_context(session_id, task.task_id, task.name)
 
     async def _store_recent_projects(self, session_id: str, result: ToolResponse) -> None:
         if not result.success or result.data is None:
