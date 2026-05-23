@@ -4,7 +4,6 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { mockLogin } from "@/lib/api";
 import { getZohoAuthRedirectUrl } from "@/lib/auth-url";
-import { startNewSessionOnLogin } from "@/lib/session";
 import { getUserId, setAuthFlag, setUserId } from "@/lib/user";
 
 export function LoginPage() {
@@ -38,7 +37,6 @@ export function LoginPage() {
       const user = await mockLogin(username.trim(), password);
       setUserId(user.user_id);
       setAuthFlag();
-      startNewSessionOnLogin();
       router.replace("/");
     } catch (err) {
       const message =
@@ -77,66 +75,24 @@ export function LoginPage() {
             Secure AI-powered workspace assistant
           </p>
 
-          <form onSubmit={handleSignIn} className="mt-8 space-y-4">
-            <div>
-              <label
-                htmlFor="username"
-                className="mb-1.5 block text-xs font-medium text-neutral-400"
-              >
-                Username
-              </label>
-              <input
-                id="username"
-                name="username"
-                type="text"
-                autoComplete="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={busy}
-                required
-                className="w-full rounded-xl border border-surface-border bg-neutral-950 px-4 py-3 text-sm text-white placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-70"
-                placeholder="jamie.lee"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="password"
-                className="mb-1.5 block text-xs font-medium text-neutral-400"
-              >
-                Password
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={busy}
-                required
-                className="w-full rounded-xl border border-surface-border bg-neutral-950 px-4 py-3 text-sm text-white placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-70"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={busy}
-              className="flex w-full items-center justify-center gap-2.5 rounded-xl bg-white px-4 py-3.5 text-sm font-semibold text-black transition-colors hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {signingIn ? (
-                <>
-                  <span
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-400 border-t-black"
-                    aria-hidden
-                  />
-                  <span>Signing in…</span>
-                </>
-              ) : (
-                "Sign In"
-              )}
-            </button>
-          </form>
+          <button
+            type="button"
+            onClick={handleContinue}
+            disabled={busy}
+            className="mt-8 flex w-full items-center justify-center gap-2.5 rounded-xl bg-white px-4 py-3.5 text-sm font-semibold text-black transition-colors hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {zohoLoading ? (
+              <>
+                <span
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-400 border-t-black"
+                  aria-hidden
+                />
+                <span>Redirecting…</span>
+              </>
+            ) : (
+              "Continue with Zoho"
+            )}
+          </button>
 
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center" aria-hidden>
@@ -147,24 +103,72 @@ export function LoginPage() {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleContinue}
-            disabled={busy}
-            className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-surface-border bg-neutral-950 px-4 py-3.5 text-sm font-semibold text-white transition-colors hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-70"
-          >
-            {zohoLoading ? (
-              <>
-                <span
-                  className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-600 border-t-white"
-                  aria-hidden
+          <div className="rounded-xl border border-surface-border/80 bg-neutral-950/60 px-4 py-4">
+            <p className="text-center text-xs font-medium uppercase tracking-wide text-neutral-500">
+              Development / Demo Mode
+            </p>
+
+            <form onSubmit={handleSignIn} className="mt-4 space-y-3">
+              <div>
+                <label
+                  htmlFor="username"
+                  className="mb-1 block text-xs font-medium text-neutral-500"
+                >
+                  Username
+                </label>
+                <input
+                  id="username"
+                  name="username"
+                  type="text"
+                  autoComplete="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={busy}
+                  required
+                  className="w-full rounded-lg border border-surface-border bg-neutral-950 px-3 py-2.5 text-sm text-white placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-70"
+                  placeholder="jamie.lee"
                 />
-                <span>Redirecting…</span>
-              </>
-            ) : (
-              "Continue with Zoho"
-            )}
-          </button>
+              </div>
+              <div>
+                <label
+                  htmlFor="password"
+                  className="mb-1 block text-xs font-medium text-neutral-500"
+                >
+                  Password
+                </label>
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                  required
+                  className="w-full rounded-lg border border-surface-border bg-neutral-950 px-3 py-2.5 text-sm text-white placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:opacity-70"
+                  placeholder="••••••••"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-surface-border bg-neutral-900 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {signingIn ? (
+                  <>
+                    <span
+                      className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-neutral-600 border-t-white"
+                      aria-hidden
+                    />
+                    <span>Signing in…</span>
+                  </>
+                ) : (
+                  "Sign in with demo account"
+                )}
+              </button>
+            </form>
+          </div>
 
           {error && (
             <p
@@ -177,8 +181,8 @@ export function LoginPage() {
         </div>
 
         <p className="mt-6 text-center text-xs text-neutral-600">
-          Demo sign-in uses test accounts. Zoho OAuth is available for real project
-          access.
+          Sign in with Zoho for real project access. Demo accounts are for local
+          testing only.
         </p>
       </div>
     </div>

@@ -15,8 +15,8 @@ import {
   ZOHO_SESSION_EXPIRED_MESSAGE,
 } from "@/lib/api";
 import {
-  consumeFreshLoginFlag,
   ensureSessionId,
+  getLinkedSessionId,
   persistSessionId,
   resetSessionId,
 } from "@/lib/session";
@@ -105,15 +105,40 @@ export function Chat() {
   );
 
   const applySessionRestore = useCallback(
-    (restore: SessionRestoreResponse, fallbackSessionId: string) => {
+    (
+      restore: SessionRestoreResponse,
+      fallbackSessionId: string,
+      uidVal: string
+    ) => {
       const resolvedSid = restore.session_id ?? fallbackSessionId;
-      persistSessionId(resolvedSid);
+      persistSessionId(resolvedSid, uidVal);
       setSessionId(resolvedSid);
       setProjectContext(restore.project_context ?? null);
       setPendingAction(null);
       setMessages(buildMessagesFromRestore(restore));
     },
     [buildMessagesFromRestore]
+  );
+
+  const applyFreshSession = useCallback(
+    (
+      uidVal: string,
+      welcome?: string | null,
+      project?: ProjectContext | null
+    ) => {
+      const newSid = resetSessionId(uidVal);
+      setSessionId(newSid);
+      setProjectContext(project ?? null);
+      setPendingAction(null);
+      setMessages([
+        {
+          id: uid(),
+          role: "assistant",
+          content: welcome?.trim() || DEFAULT_WELCOME,
+        },
+      ]);
+    },
+    []
   );
 
   const loadRecentSessions = useCallback(async (uidVal: string) => {
@@ -126,9 +151,7 @@ export function Chat() {
   }, []);
 
   useEffect(() => {
-    const sid = ensureSessionId();
     const uidVal = getUserId();
-    setSessionId(sid);
     setUserId(uidVal);
 
     let cancelled = false;
@@ -138,25 +161,32 @@ export function Chat() {
 
     (async () => {
       void loadRecentSessions(uidVal);
-      if (consumeFreshLoginFlag()) {
-        if (!cancelled) {
-          setMessages([
-            { id: uid(), role: "assistant", content: DEFAULT_WELCOME },
-          ]);
-          setProjectContext(null);
-          setPendingAction(null);
-        }
-        return;
-      }
+      const linkedSid = getLinkedSessionId(uidVal);
       try {
-        const restore = await fetchSessionRestore(uidVal, sid);
+        let restore = await fetchSessionRestore(
+          uidVal,
+          linkedSid ?? undefined
+        );
+        if (!restore.restored && linkedSid) {
+          restore = await fetchSessionRestore(uidVal);
+        }
         if (cancelled || restoreController.signal.aborted) return;
-        applySessionRestore(restore, sid);
+        if (restore.restored) {
+          applySessionRestore(
+            restore,
+            restore.session_id ?? linkedSid ?? "",
+            uidVal
+          );
+        } else {
+          applyFreshSession(
+            uidVal,
+            restore.welcome_message,
+            restore.last_active_project
+          );
+        }
       } catch {
         if (!cancelled && !restoreController.signal.aborted) {
-          setMessages([
-            { id: uid(), role: "assistant", content: DEFAULT_WELCOME },
-          ]);
+          applyFreshSession(uidVal);
         }
       }
     })();
@@ -165,7 +195,7 @@ export function Chat() {
       cancelled = true;
       restoreController.abort();
     };
-  }, [applySessionRestore, loadRecentSessions]);
+  }, [applyFreshSession, applySessionRestore, loadRecentSessions]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -284,7 +314,7 @@ export function Chat() {
 
   const handleNewSession = () => {
     cancelInFlightChat();
-    const id = resetSessionId();
+    const id = resetSessionId(userId || undefined);
     setSessionId(id);
     setMessages([
       {
@@ -339,7 +369,7 @@ export function Chat() {
     setError(null);
     try {
       const restore = await fetchSessionRestore(userId, targetSessionId);
-      applySessionRestore(restore, targetSessionId);
+      applySessionRestore(restore, targetSessionId, userId);
     } catch (err) {
       setError(toUserFacingError(err));
     } finally {

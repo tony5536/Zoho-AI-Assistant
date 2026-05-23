@@ -1,5 +1,4 @@
 import { fetchAuthStatus, logoutUser } from "@/lib/api";
-import { startNewSessionOnLogin } from "@/lib/session";
 import { clearAuthFlag, getUserId, hasAuthFlag, setAuthFlag } from "@/lib/user";
 
 export type AuthCheckStatus = "loading" | "authenticated" | "unauthenticated";
@@ -13,7 +12,6 @@ export function consumeOAuthCallbackFromUrl(): "success" | "error" | null {
 
   if (authResult === "success") {
     setAuthFlag();
-    startNewSessionOnLogin();
   }
 
   if (
@@ -53,16 +51,13 @@ export function redirectToZohoReconnect(): void {
   window.location.href = "/login?reauth=1";
 }
 
-/** Sign out on the server and clear all client auth/session state. */
+/** Sign out on the server and clear auth only (preserve session restore linkage). */
 export async function signOut(): Promise<void> {
   const userId = getUserId();
   try {
     await logoutUser(userId);
   } catch {
-    // Still clear local state so the user is signed out in the UI.
+    // Still clear auth so the user is signed out in the UI.
   }
-  if (typeof window !== "undefined") {
-    sessionStorage.clear();
-    localStorage.clear();
-  }
+  clearAuthFlag();
 }
