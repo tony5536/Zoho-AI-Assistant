@@ -6,7 +6,8 @@ from app.models.tool_models import TaskSummary, UtilisationSummary
 from app.services.zoho_auth import ZohoAuthService
 from app.services.token_store import TokenStore
 from app.services.zoho_client import ZohoClient
-from app.tools.mock_data import MockDataStore, is_active_for_utilisation
+from app.tools.mock_data import MockDataStore
+from app.utils.utilisation_helpers import is_active_for_utilisation
 from app.tools.zoho_tools import ZohoTools
 from app.utils.config import Settings
 from app.utils.utilisation_aggregate import build_utilisation_from_tasks

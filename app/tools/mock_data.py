@@ -1,12 +1,13 @@
 from copy import deepcopy
 
+from app.services.mock_users import resolve_canonical_mock_user_id
+from app.utils.utilisation_aggregate import build_utilisation_from_tasks
+from app.utils.utilisation_helpers import is_active_for_utilisation
 from app.models.tool_models import (
-    AssigneeWorkload,
     ProjectMember,
     ProjectSummary,
     TaskDetails,
     TaskSummary,
-    TaskUtilisationRow,
     UtilisationSummary,
 )
 
@@ -39,6 +40,20 @@ _INITIAL_PROJECTS: list[dict] = [
         "owner": "Sam Patel",
         "owner_user_id": "mock-sam",
     },
+    {
+        "project_id": "PRJ-101",
+        "name": "Customer Portal Revamp",
+        "status": "active",
+        "owner": "Tony Reno",
+        "owner_user_id": "tony-reno",
+    },
+    {
+        "project_id": "PRJ-102",
+        "name": "Field Ops Mobile",
+        "status": "active",
+        "owner": "Tony Reno",
+        "owner_user_id": "tony-reno",
+    },
 ]
 
 _INITIAL_TASKS: list[dict] = [
@@ -64,6 +79,126 @@ _INITIAL_TASKS: list[dict] = [
         "hours_estimated": 20.0,
         "due_date": "2026-06-01",
         "description": "Homepage wireframes and visual design.",
+        "priority": "medium",
+    },
+    {
+        "task_id": "TSK-501",
+        "project_id": "PRJ-101",
+        "name": "SSO integration",
+        "status": "open",
+        "assignee": "Tony Reno",
+        "hours_logged": 6.0,
+        "hours_estimated": 14.0,
+        "due_date": "2026-06-15",
+        "description": "Single sign-on for the customer portal.",
+        "priority": "high",
+    },
+    {
+        "task_id": "TSK-502",
+        "project_id": "PRJ-101",
+        "name": "Portal dashboard UI",
+        "status": "in_progress",
+        "assignee": "Priya Shah",
+        "hours_logged": 10.0,
+        "hours_estimated": 18.0,
+        "due_date": "2026-05-25",
+        "description": "Responsive dashboard layouts and component library.",
+        "priority": "medium",
+    },
+    {
+        "task_id": "TSK-503",
+        "project_id": "PRJ-101",
+        "name": "API rate limiting",
+        "status": "open",
+        "assignee": "Alex Morgan",
+        "hours_logged": 2.0,
+        "hours_estimated": 10.0,
+        "due_date": "2026-05-28",
+        "description": "Throttle public API endpoints for the portal.",
+        "priority": "high",
+    },
+    {
+        "task_id": "TSK-504",
+        "project_id": "PRJ-101",
+        "name": "User acceptance testing",
+        "status": "completed",
+        "assignee": "Tony Reno",
+        "hours_logged": 12.0,
+        "hours_estimated": 12.0,
+        "due_date": "2026-05-20",
+        "description": "UAT sign-off for portal milestone one.",
+        "priority": "low",
+    },
+    {
+        "task_id": "TSK-505",
+        "project_id": "PRJ-101",
+        "name": "Accessibility audit",
+        "status": "open",
+        "assignee": "Priya Shah",
+        "hours_logged": 0.0,
+        "hours_estimated": 8.0,
+        "due_date": "2026-06-02",
+        "description": "WCAG review for portal flows.",
+        "priority": "medium",
+    },
+    {
+        "task_id": "TSK-511",
+        "project_id": "PRJ-102",
+        "name": "Offline sync module",
+        "status": "in_progress",
+        "assignee": "Alex Morgan",
+        "hours_logged": 14.0,
+        "hours_estimated": 24.0,
+        "due_date": "2026-05-27",
+        "description": "Queue and replay field updates when offline.",
+        "priority": "high",
+    },
+    {
+        "task_id": "TSK-512",
+        "project_id": "PRJ-102",
+        "name": "GPS check-in workflow",
+        "status": "open",
+        "assignee": "Tony Reno",
+        "hours_logged": 3.0,
+        "hours_estimated": 12.0,
+        "due_date": "2026-06-05",
+        "description": "Geofenced check-in for field technicians.",
+        "priority": "medium",
+    },
+    {
+        "task_id": "TSK-513",
+        "project_id": "PRJ-102",
+        "name": "Push notification templates",
+        "status": "open",
+        "assignee": "Priya Shah",
+        "hours_logged": 1.0,
+        "hours_estimated": 6.0,
+        "due_date": "2026-06-08",
+        "description": "Template copy and triggers for mobile alerts.",
+        "priority": "low",
+    },
+    {
+        "task_id": "TSK-514",
+        "project_id": "PRJ-102",
+        "name": "Field pilot rollout",
+        "status": "in_progress",
+        "assignee": "Tony Reno",
+        "hours_logged": 8.0,
+        "hours_estimated": 16.0,
+        "due_date": "2026-05-30",
+        "description": "Pilot with three regional field teams.",
+        "priority": "high",
+    },
+    {
+        "task_id": "TSK-515",
+        "project_id": "PRJ-102",
+        "name": "Crash reporting integration",
+        "status": "open",
+        "assignee": "Alex Morgan",
+        "hours_logged": 0.0,
+        "hours_estimated": 10.0,
+        "due_date": "2026-06-10",
+        "description": "Wire mobile crash logs to the ops dashboard.",
         "priority": "medium",
     },
     {
@@ -134,27 +269,7 @@ _INITIAL_TASKS: list[dict] = [
     },
 ]
 
-_UTILISATION_EXCLUDED_STATUSES = frozenset({
-    "completed",
-    "done",
-    "closed",
-    "archived",
-    "cancelled",
-    "deleted",
-})
-
 _shared_store: "MockDataStore | None" = None
-
-
-def _normalize_task_status(status: str | None) -> str:
-    if not status:
-        return ""
-    return status.lower().strip().replace(" ", "_").replace("-", "_")
-
-
-def is_active_for_utilisation(task: dict) -> bool:
-    """Tasks excluded from utilisation analytics (deleted tasks are removed from the store)."""
-    return _normalize_task_status(task.get("status")) not in _UTILISATION_EXCLUDED_STATUSES
 
 
 def get_shared_mock_store(*, reset: bool = False) -> "MockDataStore":
@@ -182,6 +297,46 @@ _PROJECT_MEMBERS: dict[str, list[dict]] = {
     "PRJ-004": [
         {"user_id": "USR-3", "name": "Sam Patel", "email": "sam@example.com", "role": "QA Lead"},
     ],
+    "PRJ-101": [
+        {
+            "user_id": "USR-10",
+            "name": "Tony Reno",
+            "email": "tony.reno@example.com",
+            "role": "Project Manager",
+        },
+        {
+            "user_id": "USR-11",
+            "name": "Alex Morgan",
+            "email": "alex@example.com",
+            "role": "Lead Developer",
+        },
+        {
+            "user_id": "USR-12",
+            "name": "Priya Shah",
+            "email": "priya@example.com",
+            "role": "UX Designer",
+        },
+    ],
+    "PRJ-102": [
+        {
+            "user_id": "USR-10",
+            "name": "Tony Reno",
+            "email": "tony.reno@example.com",
+            "role": "Project Manager",
+        },
+        {
+            "user_id": "USR-11",
+            "name": "Alex Morgan",
+            "email": "alex@example.com",
+            "role": "Mobile Developer",
+        },
+        {
+            "user_id": "USR-12",
+            "name": "Priya Shah",
+            "email": "priya@example.com",
+            "role": "QA Engineer",
+        },
+    ],
 }
 
 
@@ -195,21 +350,24 @@ class MockDataStore:
         """Restore seed projects/tasks for deterministic demos and tests."""
         self._projects = deepcopy(_INITIAL_PROJECTS)
         self._tasks = deepcopy(_INITIAL_TASKS)
-        self._task_counter = 500
+        self._task_counter = 600
 
     def _project_ids_for_user(self, user_id: str | None) -> set[str]:
-        if not user_id:
+        uid = resolve_canonical_mock_user_id(user_id)
+        if not uid:
             return set()
         return {
             p["project_id"]
             for p in self._projects
-            if p.get("owner_user_id") == user_id
+            if p.get("owner_user_id") == uid
         }
 
     def user_can_access_project(self, user_id: str | None, project_id: str) -> bool:
         """True when the project belongs to the user in mock data (or is unknown to mock)."""
-        if not user_id:
+        uid = resolve_canonical_mock_user_id(user_id)
+        if not uid:
             return False
+        user_id = uid
         owner: str | None = None
         found = False
         for project in self._projects:
@@ -418,13 +576,24 @@ class MockDataStore:
         """All tasks across the mock organisation (not scoped to one user)."""
         return self.list_tasks_for_utilisation(project_id)
 
+    def get_assignee_task_count(self, project_id: str | None = None) -> dict[str, int]:
+        """Active-task counts per assignee across the mock workspace (analytics only)."""
+        if project_id and not self.get_project_org(project_id):
+            return {}
+        counts: dict[str, int] = {}
+        for task in self.list_tasks_for_utilisation(project_id):
+            counts[task.assignee] = counts.get(task.assignee, 0) + 1
+        return counts
+
     def build_utilisation_summary(
         self,
         *,
         view: str = "summary",
         project_id: str | None = None,
+        user_id: str | None = None,
     ) -> UtilisationSummary:
-        """Organisation-wide utilisation analytics across all mock users/projects."""
+        """Utilisation analytics across the mock workspace (not user-owned projects)."""
+        del user_id  # CRUD remains user-scoped; analytics is workspace-wide.
         if project_id and not self.get_project_org(project_id):
             return UtilisationSummary(
                 view=view,
@@ -446,64 +615,9 @@ class MockDataStore:
             project = self.get_project_org(project_id)
             project_name = project.name if project else None
 
-        rows: list[TaskUtilisationRow] = []
-        assignee_map: dict[str, dict] = {}
-
-        for task in tasks:
-            percent = 0.0
-            if task.hours_estimated > 0:
-                percent = round((task.hours_logged / task.hours_estimated) * 100, 1)
-            rows.append(
-                TaskUtilisationRow(
-                    task_id=task.task_id,
-                    project_id=task.project_id,
-                    name=task.name,
-                    assignee=task.assignee,
-                    hours_logged=task.hours_logged,
-                    hours_estimated=task.hours_estimated,
-                    utilisation_percent=percent,
-                )
-            )
-            bucket = assignee_map.setdefault(
-                task.assignee,
-                {"task_count": 0, "hours_logged": 0.0, "hours_estimated": 0.0, "percents": []},
-            )
-            bucket["task_count"] += 1
-            bucket["hours_logged"] += task.hours_logged
-            bucket["hours_estimated"] += task.hours_estimated
-            bucket["percents"].append(percent)
-
-        by_assignee: list[AssigneeWorkload] = []
-        for assignee, stats in assignee_map.items():
-            percents = stats["percents"]
-            avg = round(sum(percents) / len(percents), 1) if percents else 0.0
-            by_assignee.append(
-                AssigneeWorkload(
-                    assignee=assignee,
-                    task_count=stats["task_count"],
-                    hours_logged=round(stats["hours_logged"], 1),
-                    hours_estimated=round(stats["hours_estimated"], 1),
-                    avg_utilisation_percent=avg,
-                )
-            )
-
-        by_assignee.sort(key=lambda a: a.hours_logged, reverse=True)
-        top_by_tasks = max(by_assignee, key=lambda a: a.task_count).assignee if by_assignee else None
-        top_by_workload = by_assignee[0].assignee if by_assignee else None
-
-        total_logged = round(sum(t.hours_logged for t in tasks), 1)
-        total_estimated = round(sum(t.hours_estimated for t in tasks), 1)
-
-        return UtilisationSummary(
+        return build_utilisation_from_tasks(
+            tasks,
             view=view,
-            scope="project" if project_id else "all_projects",
             project_id=project_id,
             project_name=project_name,
-            total_tasks=len(tasks),
-            total_hours_logged=total_logged,
-            total_hours_estimated=total_estimated,
-            by_assignee=sorted(by_assignee, key=lambda a: a.task_count, reverse=True),
-            top_by_tasks=top_by_tasks,
-            top_by_workload=top_by_workload,
-            tasks=sorted(rows, key=lambda r: r.utilisation_percent, reverse=True),
         )

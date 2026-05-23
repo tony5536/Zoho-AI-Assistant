@@ -1,4 +1,4 @@
-import { getUserId } from "@/lib/user";
+import { getStoredUserId } from "@/lib/user";
 
 const SESSION_KEY = "zoho_assistant_session_id";
 const USER_SESSIONS_KEY = "zoho_assistant_user_sessions";
@@ -62,7 +62,7 @@ export function linkSessionToUser(userId: string, sessionId: string): void {
 export function persistSessionId(id: string, userId?: string): void {
   if (typeof window === "undefined") return;
   localStorage.setItem(SESSION_KEY, id);
-  const uid = userId || getUserId();
+  const uid = userId || getStoredUserId();
   if (uid) linkSessionToUser(uid, id);
 }
 

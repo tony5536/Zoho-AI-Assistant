@@ -11,15 +11,15 @@ from app.tools.zoho_tools import ZohoTools, set_current_user
 from app.utils.config import Settings
 
 _BASELINE_COUNTS = {
-    "Alex Morgan": 3,
+    "Alex Morgan": 6,
     "Sam Patel": 3,
     "Jamie Lee": 2,
+    "Tony Reno": 3,
+    "Priya Shah": 3,
 }
 
-
 def _assignee_counts(store: MockDataStore) -> dict[str, int]:
-    summary = store.build_utilisation_summary(view="most_tasks")
-    return {row.assignee: row.task_count for row in summary.by_assignee}
+    return store.get_assignee_task_count()
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def tools(store: MockDataStore) -> ZohoTools:
 
 def test_baseline_utilisation_counts(store: MockDataStore) -> None:
     assert _assignee_counts(store) == _BASELINE_COUNTS
-    assert store.build_utilisation_summary().total_tasks == 8
+    assert store.build_utilisation_summary().total_tasks == 17
 
 
 def test_create_task_increases_utilisation(store: MockDataStore) -> None:
@@ -54,7 +54,7 @@ def test_create_task_increases_utilisation(store: MockDataStore) -> None:
     assert created is not None
     counts = _assignee_counts(store)
     assert counts["Jamie Lee"] == _BASELINE_COUNTS["Jamie Lee"] + 1
-    assert store.build_utilisation_summary().total_tasks == 9
+    assert store.build_utilisation_summary().total_tasks == 18
 
 
 def test_delete_task_decreases_utilisation(store: MockDataStore) -> None:
@@ -62,7 +62,7 @@ def test_delete_task_decreases_utilisation(store: MockDataStore) -> None:
     assert store.get_task_org("TSK-102") is None
     counts = _assignee_counts(store)
     assert counts["Alex Morgan"] == _BASELINE_COUNTS["Alex Morgan"] - 1
-    assert store.build_utilisation_summary().total_tasks == 7
+    assert store.build_utilisation_summary().total_tasks == 16
 
 
 def test_archived_status_excluded_from_utilisation(store: MockDataStore) -> None:

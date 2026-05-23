@@ -4,6 +4,7 @@ from app.graph.workflow import AssistantWorkflow
 from app.memory.manager import MemoryManager
 from app.models.requests import ChatRequest
 from app.models.responses import ChatResponse, ResponseStatus
+from app.services.mock_users import resolve_canonical_mock_user_id
 from app.tools.zoho_tools import ZohoTools, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,10 @@ class AssistantService:
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """Run chat with a safe boundary so tool/workflow failures never crash /chat."""
-        set_current_user(request.user_id)
+        user_id = resolve_canonical_mock_user_id(request.user_id)
+        set_current_user(user_id)
         try:
-            return await self._chat_impl(request)
+            return await self._chat_impl(request, user_id=user_id)
         except Exception as exc:
             if _is_auth_runtime_error(exc):
                 raise
@@ -66,7 +68,9 @@ class AssistantService:
                 project_context=project_context,
             )
 
-    async def _chat_impl(self, request: ChatRequest) -> ChatResponse:
+    async def _chat_impl(
+        self, request: ChatRequest, *, user_id: str | None
+    ) -> ChatResponse:
         if request.cancel:
             await self._memory.dismiss_pending_action(
                 request.session_id,
@@ -86,10 +90,10 @@ class AssistantService:
         if request.confirm:
             user_message = "confirm"
 
-        if request.user_id:
-            await self._memory.record_user_query(request.user_id, request.message)
+        if user_id:
+            await self._memory.record_user_query(user_id, request.message)
             await self._memory.sync_user_memory_on_chat(
-                request.user_id,
+                user_id,
                 request.session_id,
             )
 
@@ -100,12 +104,12 @@ class AssistantService:
             session_id=request.session_id,
             role="user",
             content=request.message,
-            user_id=request.user_id,
+            user_id=user_id,
         )
 
         state = {
             "session_id": request.session_id,
-            "user_id": request.user_id,
+            "user_id": user_id,
             "user_message": user_message,
             "history": history,
             "project_context": project_context,
@@ -123,11 +127,11 @@ class AssistantService:
         tool_result = result.get("tool_result")
         updated_context = result.get("project_context") or project_context
 
-        if request.user_id:
+        if user_id:
             if updated_context:
-                await self._memory.save_default_project(request.user_id, updated_context)
+                await self._memory.save_default_project(user_id, updated_context)
             await self._memory.sync_user_memory_on_chat(
-                request.user_id,
+                user_id,
                 request.session_id,
                 user_message=request.message,
                 assistant_reply=reply,
@@ -138,7 +142,7 @@ class AssistantService:
             session_id=request.session_id,
             role="assistant",
             content=reply,
-            user_id=request.user_id,
+            user_id=user_id,
         )
 
         return ChatResponse(

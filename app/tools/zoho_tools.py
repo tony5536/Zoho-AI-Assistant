@@ -20,6 +20,8 @@ from app.models.tool_models import (
     ToolResponse,
 )
 from app.utils.utilisation_aggregate import build_utilisation_from_tasks
+from app.services.mock_users import is_canonical_mock_user_id, resolve_canonical_mock_user_id
+from app.services.oauth_users import is_oauth_user_id, resolve_oauth_user_id
 from app.services.token_store import TokenStore
 from app.services.zoho_auth import ZohoAuthService
 from app.services.zoho_client import ZohoClient
@@ -64,7 +66,10 @@ class ZohoTools:
         return self._mock.get_task(ref, user_id=self._mock_user())
 
     def _mock_user(self) -> str | None:
-        return get_current_user()
+        raw = get_current_user()
+        if is_oauth_user_id(raw):
+            return resolve_oauth_user_id(raw)
+        return resolve_canonical_mock_user_id(raw)
 
     async def list_projects(self) -> ToolResponse:
         live = await self._live_call("list_projects")
@@ -353,7 +358,11 @@ class ZohoTools:
                 ),
             )
 
-        if project_id and not self._mock.get_project_org(project_id) and not await self._has_live():
+        if (
+            project_id
+            and not self._mock.get_project_org(project_id)
+            and not await self._has_live()
+        ):
             return self._error(
                 "get_task_utilisation",
                 "PROJECT_NOT_FOUND",
@@ -365,7 +374,7 @@ class ZohoTools:
                 view=view,
                 project_id=project_id,
             )
-            if live_summary is not None:
+            if live_summary is not None and live_summary.by_assignee:
                 return ToolResponse(
                     tool="get_task_utilisation",
                     success=True,
@@ -511,8 +520,13 @@ class ZohoTools:
     async def _has_live(self) -> bool:
         if self._settings.zoho_use_mock:
             return False
-        user_id = get_current_user()
+        raw = get_current_user()
+        if is_oauth_user_id(raw):
+            return False
+        user_id = resolve_canonical_mock_user_id(raw)
         if not user_id:
+            return False
+        if is_canonical_mock_user_id(user_id):
             return False
         if await self._token_store.is_demo_user(user_id):
             return False

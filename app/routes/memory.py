@@ -2,8 +2,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.models.tool_models import ProjectContext, RecentProject
+from app.services.mock_users import resolve_canonical_mock_user_id
+from app.services.oauth_users import is_oauth_user_id, resolve_oauth_user_id
 
 router = APIRouter()
+
+
+def _scoped_user_id(user_id: str) -> str:
+    if is_oauth_user_id(user_id):
+        return resolve_oauth_user_id(user_id)
+    return resolve_canonical_mock_user_id(user_id) or user_id
 
 
 class HistoryMessage(BaseModel):
@@ -59,6 +67,7 @@ async def memory_context(
 ) -> MemoryContextResponse:
     """Restore per-user memory into the session and return a personalized welcome."""
     memory = request.app.state.memory
+    user_id = _scoped_user_id(user_id)
     snapshot = await memory.restore_user_memory_on_login(user_id)
     project_context = await memory.apply_user_memory_to_session(user_id, session_id)
     welcome = snapshot.welcome_message
@@ -83,7 +92,7 @@ async def recent_sessions(
 ) -> list[RecentSessionItem]:
     """List recent chat sessions for an authenticated user."""
     memory = request.app.state.memory
-    rows = await memory.get_recent_sessions(user_id)
+    rows = await memory.get_recent_sessions(_scoped_user_id(user_id))
     return [RecentSessionItem(**row) for row in rows]
 
 
@@ -95,6 +104,7 @@ async def restore_session(
 ) -> SessionRestoreResponse:
     """Restore a chat session for an authenticated user (latest, or by session_id)."""
     memory = request.app.state.memory
+    user_id = _scoped_user_id(user_id)
     restored = await memory.restore_user_session(user_id, session_id=session_id)
 
     if restored is None:
@@ -147,7 +157,7 @@ async def delete_session(
 ) -> DeleteSessionResponse:
     """Delete a stored conversation (all messages and session context)."""
     memory = request.app.state.memory
-    deleted = await memory.delete_session(user_id, session_id)
+    deleted = await memory.delete_session(_scoped_user_id(user_id), session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
     return DeleteSessionResponse(success=True, session_id=session_id)
@@ -161,7 +171,7 @@ async def delete_message(
 ) -> DeleteMessageResponse:
     """Delete a single message from the user's chat history."""
     memory = request.app.state.memory
-    deleted = await memory.delete_message(user_id, message_id)
+    deleted = await memory.delete_message(_scoped_user_id(user_id), message_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Message not found.")
     return DeleteMessageResponse(success=True, message_id=message_id)

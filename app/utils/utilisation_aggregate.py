@@ -8,7 +8,7 @@ from app.models.tool_models import (
     TaskUtilisationRow,
     UtilisationSummary,
 )
-from app.tools.mock_data import is_active_for_utilisation
+from app.utils.utilisation_helpers import is_active_for_utilisation
 
 _COMPLETED_STATUSES = frozenset({"completed", "done", "closed", "archived", "cancelled", "deleted"})
 

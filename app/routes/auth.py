@@ -5,8 +5,29 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.models.tool_models import ProjectContext
+from app.services.oauth_users import (
+    OAUTH_DISPLAY_NAME,
+    resolve_oauth_user_id,
+)
 
 router = APIRouter()
+
+
+def _oauth_login_redirect_params(
+    settings,
+    *,
+    user_id: str,
+    session_id: str,
+    auth: str,
+) -> str:
+    params = urlencode(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "auth": auth,
+        }
+    )
+    return f"{settings.frontend_url}?{params}"
 
 
 class AuthUrlResponse(BaseModel):
@@ -77,7 +98,7 @@ async def login(
     user_id: str = Query(..., min_length=1, description="Stable user identifier"),
 ) -> AuthUrlResponse:
     """Start Zoho OAuth (spec: GET /auth/login)."""
-    return await _authorization_url(request, user_id)
+    return await _authorization_url(request, resolve_oauth_user_id(user_id))
 
 
 @router.get("/zoho", include_in_schema=False)
@@ -104,24 +125,36 @@ async def _redirect_to_zoho_auth(request: Request, user_id: str) -> RedirectResp
     settings = request.app.state.settings
 
     if settings.zoho_use_mock:
+        oauth_user_id = resolve_oauth_user_id(user_id)
         token_store = request.app.state.token_store
         await token_store.save_tokens(
-            user_id=user_id,
+            user_id=oauth_user_id,
             access_token="mock-access",
             refresh_token="mock-refresh",
             expires_in=86400,
         )
         memory = request.app.state.memory
-        await memory.restore_user_memory_on_login(user_id)
-        params = urlencode({"user_id": user_id, "auth": "success"})
-        return RedirectResponse(url=f"{settings.frontend_url}?{params}")
+        await memory.restore_user_memory_on_login(
+            oauth_user_id,
+            display_name=OAUTH_DISPLAY_NAME,
+        )
+        session_id = await memory.begin_login_session(oauth_user_id)
+        return RedirectResponse(
+            url=_oauth_login_redirect_params(
+                settings,
+                user_id=oauth_user_id,
+                session_id=session_id,
+                auth="success",
+            )
+        )
 
     if not settings.zoho_client_id:
         params = urlencode({"auth": "error", "user_id": user_id})
         return RedirectResponse(url=f"{settings.frontend_url}/login?{params}")
 
+    oauth_user_id = resolve_oauth_user_id(user_id)
     auth_service = request.app.state.zoho_auth
-    authorization_url = auth_service.get_authorization_url(user_id)
+    authorization_url = auth_service.get_authorization_url(oauth_user_id)
     return RedirectResponse(url=authorization_url, status_code=302)
 
 
@@ -140,8 +173,10 @@ async def callback(
     """OAuth callback — persist tokens and redirect to the chat UI."""
     settings = request.app.state.settings
 
+    oauth_user_id = resolve_oauth_user_id(state)
+
     if error or not code:
-        params = urlencode({"auth": "error", "user_id": state})
+        params = urlencode({"auth": "error", "user_id": oauth_user_id})
         return RedirectResponse(url=f"{settings.frontend_url}?{params}")
 
     auth_service = request.app.state.zoho_auth
@@ -152,13 +187,13 @@ async def callback(
             code, accounts_url=accounts_server
         )
     except Exception:
-        params = urlencode({"auth": "error", "user_id": state})
+        params = urlencode({"auth": "error", "user_id": oauth_user_id})
         return RedirectResponse(url=f"{settings.frontend_url}?{params}")
 
     accounts_url = accounts_server or settings.zoho_accounts_url
     new_refresh = tokens.get("refresh_token") or ""
     await token_store.save_tokens(
-        user_id=state,
+        user_id=oauth_user_id,
         access_token=tokens["access_token"],
         refresh_token=new_refresh,
         expires_in=int(tokens.get("expires_in", 3600)),
@@ -166,13 +201,23 @@ async def callback(
         accounts_url=accounts_url,
     )
     if not new_refresh:
-        await token_store.clear_refresh_token(state)
+        await token_store.clear_refresh_token(oauth_user_id)
 
     memory = request.app.state.memory
-    await memory.restore_user_memory_on_login(state)
+    await memory.restore_user_memory_on_login(
+        oauth_user_id,
+        display_name=OAUTH_DISPLAY_NAME,
+    )
+    session_id = await memory.begin_login_session(oauth_user_id)
 
-    params = urlencode({"user_id": state, "auth": "success"})
-    return RedirectResponse(url=f"{settings.frontend_url}?{params}")
+    return RedirectResponse(
+        url=_oauth_login_redirect_params(
+            settings,
+            user_id=oauth_user_id,
+            session_id=session_id,
+            auth="success",
+        )
+    )
 
 
 @router.get("/zoho/callback", include_in_schema=False)

@@ -20,7 +20,12 @@ import {
   persistSessionId,
   resetSessionId,
 } from "@/lib/session";
-import { getUserId } from "@/lib/user";
+import {
+  getStoredUserId,
+  isMockUserId,
+  isOAuthUserId,
+  OAUTH_NEW_SESSION_MESSAGE,
+} from "@/lib/user";
 import type {
   ChatMessage,
   ChatResponse,
@@ -151,8 +156,9 @@ export function Chat() {
   }, []);
 
   useEffect(() => {
-    const uidVal = getUserId();
+    const uidVal = getStoredUserId();
     setUserId(uidVal);
+    if (!uidVal) return;
 
     let cancelled = false;
     restoreAbortRef.current?.abort();
@@ -167,7 +173,7 @@ export function Chat() {
           uidVal,
           linkedSid ?? undefined
         );
-        if (!restore.restored && linkedSid) {
+        if (!restore.restored && linkedSid && isMockUserId(uidVal)) {
           restore = await fetchSessionRestore(uidVal);
         }
         if (cancelled || restoreController.signal.aborted) return;
@@ -178,11 +184,10 @@ export function Chat() {
             uidVal
           );
         } else {
-          applyFreshSession(
-            uidVal,
-            restore.welcome_message,
-            restore.last_active_project
-          );
+          const welcome = isOAuthUserId(uidVal)
+            ? OAUTH_NEW_SESSION_MESSAGE
+            : restore.welcome_message;
+          applyFreshSession(uidVal, welcome, restore.last_active_project);
         }
       } catch {
         if (!cancelled && !restoreController.signal.aborted) {
@@ -316,11 +321,14 @@ export function Chat() {
     cancelInFlightChat();
     const id = resetSessionId(userId || undefined);
     setSessionId(id);
+    const newSessionMessage = isOAuthUserId(userId)
+      ? OAUTH_NEW_SESSION_MESSAGE
+      : "New session started. How can I help with your projects?";
     setMessages([
       {
         id: uid(),
         role: "assistant",
-        content: "New session started. How can I help with your projects?",
+        content: newSessionMessage,
       },
     ]);
     setProjectContext(null);

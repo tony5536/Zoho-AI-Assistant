@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { mockLogin } from "@/lib/api";
 import { getZohoAuthRedirectUrl } from "@/lib/auth-url";
-import { getUserId, setAuthFlag, setUserId } from "@/lib/user";
+import { getOAuthUserId, setAuthenticatedUser } from "@/lib/user";
 
 export function LoginPage() {
   const router = useRouter();
@@ -35,8 +35,7 @@ export function LoginPage() {
     setSigningIn(true);
     try {
       const user = await mockLogin(username.trim(), password);
-      setUserId(user.user_id);
-      setAuthFlag();
+      setAuthenticatedUser(user.user_id);
       router.replace("/");
     } catch (err) {
       const message =
@@ -50,7 +49,7 @@ export function LoginPage() {
   const handleContinue = () => {
     setError(null);
     setZohoLoading(true);
-    window.location.href = getZohoAuthRedirectUrl(getUserId());
+    window.location.href = getZohoAuthRedirectUrl(getOAuthUserId());
   };
 
   const busy = signingIn || zohoLoading;

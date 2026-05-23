@@ -18,6 +18,7 @@ _SESSION_TITLE_MAX_LEN = 72
 _RESTORE_CONTINUATION_MESSAGE = (
     "Welcome back — continuing your previous session."
 )
+_ACTIVE_SESSION_PREF = "active_session_id"
 
 
 class MemoryManager:
@@ -148,6 +149,25 @@ class MemoryManager:
             )
             await db.commit()
             await configure_connection(db)
+
+    async def get_active_session_id(self, user_id: str) -> str | None:
+        """Return the user's linked active session id (set on login / new session)."""
+        raw = await self.get_user_preference(user_id, _ACTIVE_SESSION_PREF)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return None
+
+    async def set_active_session_id(self, user_id: str, session_id: str) -> None:
+        await self.set_user_preference(user_id, _ACTIVE_SESSION_PREF, session_id)
+
+    async def begin_login_session(self, user_id: str) -> str:
+        """
+        Start a new empty chat session on login without deleting prior sessions.
+        Stores the new id as the user's active linked session.
+        """
+        session_id = str(uuid.uuid4())
+        await self.set_active_session_id(user_id, session_id)
+        return session_id
 
     async def get_latest_session_id_for_user(self, user_id: str) -> str | None:
         """Return the session_id of the user's most recent chat message."""
@@ -289,7 +309,9 @@ class MemoryManager:
         When session_id is omitted, restores the latest session.
         """
         if session_id is None:
-            session_id = await self.get_latest_session_id_for_user(user_id)
+            session_id = await self.get_active_session_id(user_id)
+            if session_id is None:
+                session_id = await self.get_latest_session_id_for_user(user_id)
         elif not await self.user_owns_session(user_id, session_id):
             return None
 
@@ -299,6 +321,8 @@ class MemoryManager:
         await self.dismiss_pending_action(session_id)
 
         history = await self.get_history(session_id, limit=history_limit)
+        if not history:
+            return None
         project_context = await self.get_project_context(session_id)
         if project_context is None:
             project_context = await self.apply_user_memory_to_session(

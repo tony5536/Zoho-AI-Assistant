@@ -7,7 +7,8 @@ from app.agents.query_agent import QueryAgent
 from app.agents.supervisor import SupervisorAgent
 from app.graph.state import GraphState, Route
 from app.memory.manager import MemoryManager
-from app.tools.zoho_tools import ZohoTools
+from app.services.mock_users import resolve_canonical_mock_user_id
+from app.tools.zoho_tools import ZohoTools, set_current_user
 
 
 class AssistantWorkflow:
@@ -31,6 +32,7 @@ class AssistantWorkflow:
         )
 
     async def invoke(self, state: GraphState) -> GraphState:
+        set_current_user(resolve_canonical_mock_user_id(state.get("user_id")))
         result: dict[str, Any] = await self._graph.ainvoke(state)
         return result  # type: ignore[return-value]
 
@@ -46,13 +48,19 @@ def build_workflow(
 ):
     graph = StateGraph(GraphState)
 
+    def _bind_user(state: GraphState) -> None:
+        set_current_user(resolve_canonical_mock_user_id(state.get("user_id")))
+
     async def supervisor_node(state: GraphState) -> dict[str, Any]:
+        _bind_user(state)
         return await supervisor.run(state)
 
     async def query_node(state: GraphState) -> dict[str, Any]:
+        _bind_user(state)
         return await query_agent.run(state)
 
     async def action_node(state: GraphState) -> dict[str, Any]:
+        _bind_user(state)
         return await action_agent.run(state)
 
     graph.add_node("supervisor", supervisor_node)
